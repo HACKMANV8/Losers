@@ -12,13 +12,13 @@ import io
 CONFIG = {
     "d_model": 128,
     "nhead": 4,
-    "num_encoder_layers": 2,
+    "num_decoder_layers": 2,
     "dim_feedforward": 256,
     "feature_mlp_layers": [128, 128],
     "lr": 0.001,
     "epochs": 10,
     "batch_size": 32,
-    "target_metric": "binary_size",  # "runtime" or "binary_size"
+    "target_metric": "runtime",  # "runtime" or "binary_size"
     "max_seq_len": 64,
     "val_split": 0.2,
     "dropout": 0.1,
@@ -185,19 +185,18 @@ class PositionalEncoding(nn.Module):
 
 class PassFormer(nn.Module):
     """
-    Transformer-based model to predict performance from pass sequences and features.
+    Transformer-based seq2seq model for NeuroOpt.
+    Encoder: MLP processing program features.
+    Decoder: Transformer generating a pass sequence.
     """
-    def __init__(self, vocab_size, num_features, d_model, nhead, num_encoder_layers,
+    def __init__(self, vocab_size, num_features, d_model, nhead, num_decoder_layers,
                  dim_feedforward, feature_mlp_layers, max_seq_len, dropout=0.1):
         super().__init__()
         self.d_model = d_model
         self.pass_embedding = nn.Embedding(vocab_size, d_model)
         self.pos_encoder = PositionalEncoding(d_model, dropout, max_seq_len)
-        
-        encoder_layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, batch_first=True)
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_encoder_layers)
 
-        # MLP for program features
+        # Encoder (MLP for features)
         mlp_layers = []
         input_dim = num_features
         for layer_dim in feature_mlp_layers:
@@ -207,41 +206,150 @@ class PassFormer(nn.Module):
             input_dim = layer_dim
         self.feature_mlp = nn.Sequential(*mlp_layers)
 
-        # Fusion and regression head
-        # TODO: Experiment with other fusion methods (e.g., attention)
-        self.fusion_dim = d_model + (feature_mlp_layers[-1] if feature_mlp_layers else 0)
-        self.regression_head = nn.Sequential(
-            nn.Linear(self.fusion_dim, self.fusion_dim // 2),
-            nn.ReLU(),
-            nn.Linear(self.fusion_dim // 2, 1)
+        # Project feature representation to d_model to be used as memory
+        self.feature_projection = nn.Linear(input_dim, d_model)
+
+        # Decoder
+        decoder_layer = nn.TransformerDecoderLayer(d_model, nhead, dim_feedforward, dropout, batch_first=True)
+        self.transformer_decoder = nn.TransformerDecoder(decoder_layer, num_decoder_layers)
+
+        # Output layer
+        self.fc_out = nn.Linear(d_model, vocab_size)
+
+    def forward(self, features, target_sequence):
+        # Encode features
+        feature_representation = self.feature_mlp(features)
+        memory = self.feature_projection(feature_representation).unsqueeze(1) # (batch, 1, d_model)
+
+        # Decode sequence
+        target_emb = self.pass_embedding(target_sequence) * math.sqrt(self.d_model)
+        target_emb = self.pos_encoder(target_emb)
+
+        # Generate a causal mask for the decoder
+        target_mask = nn.Transformer.generate_square_subsequent_mask(target_sequence.size(1)).to(features.device)
+        
+        # Create padding mask for the target sequence
+        target_padding_mask = (target_sequence == 0) # Assumes <pad> token is 0
+
+        decoder_output = self.transformer_decoder(
+            tgt=target_emb,
+            memory=memory,
+            tgt_mask=target_mask,
+            tgt_key_padding_mask=target_padding_mask
         )
 
-    def forward(self, features, sequence_tokens):
-        # Process sequence
-        seq_emb = self.pass_embedding(sequence_tokens) * math.sqrt(self.d_model)
-        seq_emb = self.pos_encoder(seq_emb)
-        
-        # Create padding mask
-        padding_mask = (sequence_tokens == 0) # Assumes <pad> token is 0
-        
-        transformer_out = self.transformer_encoder(seq_emb, src_key_padding_mask=padding_mask)
-        
-        # Aggregate transformer output (mean pooling over non-padded tokens)
-        # We invert the mask to use it for averaging
-        mask_expanded = ~padding_mask.unsqueeze(-1).expand_as(transformer_out)
-        seq_representation = (transformer_out * mask_expanded).sum(1) / mask_expanded.sum(1)
-
-        # Process features
-        feature_representation = self.feature_mlp(features)
-
-        # Fuse and predict
-        fused = torch.cat((seq_representation, feature_representation), dim=1)
-        prediction = self.regression_head(fused)
-        
-        return prediction.squeeze(-1)
+        return self.fc_out(decoder_output)
 
 
 # --- Training Loop ---
+
+import torch.nn.functional as F
+
+def beam_search_decode(model, features, dataset, device, beam_width=5, max_len=50):
+    """Generates a pass sequence using beam search."""
+    model.eval()
+
+    # Normalize features
+    features = dataset.feature_scaler.transform(features.reshape(1, -1))
+    features = torch.tensor(features, dtype=torch.float32).to(device)
+
+    # Start with SOS token
+    start_token = dataset.pass_vocab['<sos>']
+    end_token = dataset.pass_vocab['<eos>']
+
+    # Initialize beams
+    # Each beam is a tuple of (sequence, score)
+    beams = [([start_token], 0.0)]
+
+    for _ in range(max_len):
+        new_beams = []
+        for seq, score in beams:
+            if seq[-1] == end_token:
+                new_beams.append((seq, score))
+                continue
+
+            input_tensor = torch.tensor([seq], dtype=torch.long).to(device)
+            with torch.no_grad():
+                output_logits = model(features, input_tensor)
+            
+            # Get the last predicted token probabilities
+            log_probs = F.log_softmax(output_logits[0, -1, :], dim=0)
+            top_k_log_probs, top_k_indices = torch.topk(log_probs, beam_width)
+
+            for i in range(beam_width):
+                new_seq = seq + [top_k_indices[i].item()]
+                new_score = score + top_k_log_probs[i].item()
+                new_beams.append((new_seq, new_score))
+
+        # Sort all new beams by score and keep the top k
+        beams = sorted(new_beams, key=lambda x: x[1], reverse=True)[:beam_width]
+
+    # Return the best sequence
+    best_seq, _ = beams[0]
+    if best_seq[-1] != end_token:
+        best_seq.append(end_token)
+
+    # Convert token IDs back to passes
+    id_to_pass = {v: k for k, v in dataset.pass_vocab.items()}
+    generated_passes = [id_to_pass.get(tok, '<unk>') for tok in best_seq[1:-1]] # Exclude SOS and EOS
+    
+    return generated_passes
+
+from nltk.translate.bleu_score import sentence_bleu
+from Levenshtein import distance as levenshtein_distance
+from scipy.spatial.distance import jaccard
+
+def evaluate_model(model, val_dataset, device):
+    """Evaluates the model on the validation set using multiple metrics."""
+    model.eval()
+    total_bleu_score = 0
+    exact_matches = 0
+    total_jaccard_similarity = 0
+    total_levenshtein_distance = 0
+    dataset = val_dataset.dataset
+
+    print("\n--- Model Evaluation (Beam Search) ---")
+    for idx in val_dataset.indices:
+        original_sample = dataset.samples[idx]
+        features = original_sample['features']
+        
+        generated_sequence = beam_search_decode(model, features, dataset, device)
+        reference_sequence = original_sample['sequence']
+        
+        print(f"Reference sequence: {reference_sequence}")
+        print(f"Generated sequence: {generated_sequence}")
+        
+        # Exact Match
+        if generated_sequence == reference_sequence:
+            exact_matches += 1
+
+        # Jaccard Similarity
+        jaccard_sim = 1 - jaccard(set(reference_sequence), set(generated_sequence))
+        total_jaccard_similarity += jaccard_sim
+
+        # Levenshtein Distance
+        lev_dist = levenshtein_distance(generated_sequence, reference_sequence)
+        total_levenshtein_distance += lev_dist
+
+        # BLEU Score
+        bleu_score = sentence_bleu([reference_sequence], generated_sequence)
+        total_bleu_score += bleu_score
+        
+        print(f"BLEU: {bleu_score:.4f}, Jaccard: {jaccard_sim:.4f}, Levenshtein: {lev_dist}")
+
+    num_samples = len(val_dataset)
+    avg_bleu_score = total_bleu_score / num_samples
+    exact_match_accuracy = exact_matches / num_samples
+    avg_jaccard_similarity = total_jaccard_similarity / num_samples
+    avg_levenshtein_distance = total_levenshtein_distance / num_samples
+
+    print("\n--- Evaluation Summary ---")
+    print(f"Exact Match Accuracy: {exact_match_accuracy:.4f}")
+    print(f"Average Jaccard Similarity: {avg_jaccard_similarity:.4f}")
+    print(f"Average Levenshtein Distance: {avg_levenshtein_distance:.4f}")
+    print(f"Average BLEU score: {avg_bleu_score:.4f}")
+
+
 
 def train_model():
     """Main function to orchestrate model training."""
@@ -253,9 +361,6 @@ def train_model():
     print(f"Using device: {device}")
 
     # Load data
-    # In a real scenario, you would load from a file:
-    # with open('tools/training_data/training_data.json', 'r') as f:
-    #     json_data = json.load(f)
     with open('tools/training_data/training_data_flat.json', 'r') as f:
         json_data = json.load(f)
 
@@ -288,7 +393,7 @@ def train_model():
         num_features=dataset.num_features,
         d_model=CONFIG['d_model'],
         nhead=CONFIG['nhead'],
-        num_encoder_layers=CONFIG['num_encoder_layers'],
+        num_decoder_layers=CONFIG['num_decoder_layers'],
         dim_feedforward=CONFIG['dim_feedforward'],
         feature_mlp_layers=CONFIG['feature_mlp_layers'],
         max_seq_len=CONFIG['max_seq_len'],
@@ -296,21 +401,27 @@ def train_model():
     ).to(device)
 
     # Loss, optimizer, and scheduler
-    loss_fn = nn.MSELoss()
+    loss_fn = nn.CrossEntropyLoss(ignore_index=dataset.pass_vocab['<pad>'])
     optimizer = torch.optim.AdamW(model.parameters(), lr=CONFIG['lr'])
-    # TODO: Experiment with different schedulers (e.g., CosineAnnealingLR)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.5)
 
     # Training loop
     for epoch in range(CONFIG['epochs']):
         model.train()
         total_train_loss = 0
-        for features, sequences, targets in train_loader:
-            features, sequences, targets = features.to(device), sequences.to(device), targets.to(device)
+        for features, sequences in train_loader:
+            features, sequences = features.to(device), sequences.to(device)
+
+            # Prepare decoder input and target
+            decoder_input = sequences[:, :-1]
+            decoder_target = sequences[:, 1:]
 
             optimizer.zero_grad()
-            predictions = model(features, sequences)
-            loss = loss_fn(predictions, targets)
+            predictions = model(features, decoder_input)
+            
+            # Reshape for loss calculation
+            loss = loss_fn(predictions.reshape(-1, dataset.vocab_size), decoder_target.reshape(-1))
+            
             loss.backward()
             optimizer.step()
 
@@ -322,10 +433,14 @@ def train_model():
         model.eval()
         total_val_loss = 0
         with torch.no_grad():
-            for features, sequences, targets in val_loader:
-                features, sequences, targets = features.to(device), sequences.to(device), targets.to(device)
-                predictions = model(features, sequences)
-                loss = loss_fn(predictions, targets)
+            for features, sequences in val_loader:
+                features, sequences = features.to(device), sequences.to(device)
+
+                decoder_input = sequences[:, :-1]
+                decoder_target = sequences[:, 1:]
+
+                predictions = model(features, decoder_input)
+                loss = loss_fn(predictions.reshape(-1, dataset.vocab_size), decoder_target.reshape(-1))
                 total_val_loss += loss.item()
 
         avg_val_loss = total_val_loss / len(val_loader)
@@ -334,8 +449,30 @@ def train_model():
         scheduler.step()
 
     print("--- Training Complete ---")
-    # TODO: Add code to save the trained model and the vocab/scaler
-    # torch.save(model.state_dict(), 'passformer.pth')
+
+    # Save the model and supplementary data
+    model_save_path = f'passformer_{CONFIG["target_metric"]}.pth'
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'vocab': dataset.pass_vocab,
+        'feature_keys': dataset.feature_keys,
+        'feature_scaler': dataset.feature_scaler,
+        'config': CONFIG
+    }, model_save_path)
+    print(f"Model and data saved to {model_save_path}")
+
+    # --- Example Generation ---
+    print("\n--- Example Sequence Generation (Beam Search) ---")
+    # Take the first sample from the validation set for demonstration
+    first_val_sample_idx = val_dataset.indices[0]
+    original_sample = dataset.samples[first_val_sample_idx]
+    features = original_sample['features']
+
+    generated_sequence = beam_search_decode(model, features, dataset, device)
+    print(f"Generated sequence for a sample program: {generated_sequence}")
+
+    # --- Evaluation ---
+    evaluate_model(model, val_dataset, device)
 
 
 if __name__ == '__main__':

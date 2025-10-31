@@ -11,6 +11,9 @@ import joblib # For saving/loading scaler
 MAX_PASS_SEQ_LEN = 60 # Increased max length for combined common and machine passes
 TARGET_METRICS = ['execution_time', 'binary_size'] # Metrics to be predicted
 
+total_none_sequences = 0
+total_sequences = 0
+
 # --- Preprocessing Functions ---
 
 def clean_and_tag_passes(pass_str, hardware_prefix=None):
@@ -39,6 +42,7 @@ def clean_and_tag_passes(pass_str, hardware_prefix=None):
         return [f"{hardware_prefix}::{p}" for p in passes]
     return passes
 
+
 def build_vocabularies(data_entries):
     """
     Builds a joint vocabulary for all passes (common and tagged machine) and hardware types.
@@ -50,35 +54,60 @@ def build_vocabularies(data_entries):
     hardware_idx = len(hardware_vocab)
 
     for entry in data_entries:
-        # Common Passes
-        common_passes = clean_and_tag_passes(entry.get('common_passes'))
+        # Extract pass sequence (look for 'pass_sequence' key)
+        pass_sequence_str = entry.get('pass_sequence', '')
+        common_passes = clean_and_tag_passes(pass_sequence_str)
         for p in common_passes:
             if p not in joint_pass_vocab:
                 joint_pass_vocab[p] = joint_pass_idx
                 joint_pass_idx += 1
         
-        # Machine Passes (tagged)
-        hardware = entry.get('hardware')
-        hardware_prefix = hardware.lower() if hardware else "default_hardware"
-        machine_passes = clean_and_tag_passes(entry.get('machine_passes'), hardware_prefix=hardware_prefix)
-        for p in machine_passes:
+        # Extract machine configuration as hardware identifier
+        # Build a hardware string from machine_* keys
+        machine_config_parts = []
+        for key in sorted(entry.keys()):
+            if key.startswith('machine_'):
+                value = entry[key]
+                if isinstance(value, bool):
+                    if value:  # Only include true flags
+                        machine_config_parts.append(key.replace('machine_', ''))
+                elif value is not None:
+                    machine_config_parts.append(f"{key.replace('machine_', '')}_{value}")
+        
+        # Create hardware identifier from machine config
+        if machine_config_parts:
+            hardware = '_'.join(machine_config_parts[:5])  # Limit to first 5 features to avoid too long names
+        else:
+            hardware = "default_hardware"
+        
+        # Add machine passes as tagged passes
+        hardware_prefix = hardware.lower()
+        machine_pass_list = []
+        for key in entry.keys():
+            if key.startswith('machine_'):
+                value = entry[key]
+                if isinstance(value, bool) and value:
+                    machine_pass_list.append(key)
+                elif isinstance(value, str):
+                    machine_pass_list.append(f"{key}_{value}")
+        
+        tagged_machine_passes = clean_and_tag_passes(machine_pass_list, hardware_prefix=hardware_prefix)
+        for p in tagged_machine_passes:
             if p not in joint_pass_vocab:
                 joint_pass_vocab[p] = joint_pass_idx
                 joint_pass_idx += 1
         
-        # Hardware
+        # Add hardware to vocabulary
         if hardware and hardware not in hardware_vocab:
             hardware_vocab[hardware] = hardware_idx
-            hardware_idx += 1
-        elif not hardware and "default_hardware" not in hardware_vocab: # Add default if hardware is missing
-            hardware_vocab["default_hardware"] = hardware_idx
             hardware_idx += 1
             
     print(f"Joint Pass Vocab Size: {len(joint_pass_vocab)}")
     print(f"Hardware Vocab Size: {len(hardware_vocab)}")
-    print(f"Hardware Vocab: {hardware_vocab}")
+    print(f"Sample passes in vocab: {list(joint_pass_vocab.keys())[4:14]}")  # Show first 10 actual passes
     
     return joint_pass_vocab, hardware_vocab
+
 
 def tokenize_and_pad(sequence_list, vocab, max_len):
     """Converts a list of pass names to token IDs, adds SOS/EOS, and pads/truncates."""
@@ -100,6 +129,8 @@ def load_and_preprocess_data(json_data_path, max_seq_len=MAX_PASS_SEQ_LEN, targe
     Loads raw JSON data, builds vocabularies, tokenizes, encodes, and normalizes features.
     Returns processed samples, scaler, feature keys, and vocabularies.
     """
+    global total_none_sequences, total_sequences
+    
     with open(json_data_path, 'r') as f:
         raw_data_entries = json.load(f)
 
@@ -149,23 +180,86 @@ def load_and_preprocess_data(json_data_path, max_seq_len=MAX_PASS_SEQ_LEN, targe
 
     # Second pass to process all data
     for i, entry in enumerate(raw_data_entries):
-        hardware = entry.get('hardware')
-        hardware_prefix = hardware.lower() if hardware else "default_hardware"
-
-        # Clean common passes
-        common_passes_list = clean_and_tag_passes(entry.get('common_passes'))
+        # Extract pass sequence from 'pass_sequence' key
+        pass_sequence_str = entry.get('pass_sequence', '')
+        common_passes_list = clean_and_tag_passes(pass_sequence_str)
         
-        # Clean and tag machine passes
-        machine_passes_list = clean_and_tag_passes(entry.get('machine_passes'), hardware_prefix=hardware_prefix)
+        # Extract machine configuration to create hardware identifier
+        machine_config_parts = []
+        for key in sorted(entry.keys()):
+            if key.startswith('machine_'):
+                value = entry[key]
+                if isinstance(value, bool):
+                    if value:
+                        machine_config_parts.append(key.replace('machine_', ''))
+                elif value is not None:
+                    machine_config_parts.append(f"{key.replace('machine_', '')}_{value}")
+        
+        if machine_config_parts:
+            hardware = '_'.join(machine_config_parts[:5])
+        else:
+            hardware = "default_hardware"
+        
+        hardware_prefix = hardware.lower()
+        
+        # Extract machine-specific passes from keys starting with 'machine_'
+        machine_passes_list = []
+        for key, value in entry.items():
+            if key.startswith('machine_'):
+                if isinstance(value, bool) and value:
+                    machine_passes_list.append(key)
+                elif isinstance(value, str) and value.strip() != "":
+                    machine_passes_list.append(f"{key}_{value}")
+        
+        # Tag machine passes with hardware prefix
+        tagged_machine_passes = clean_and_tag_passes(machine_passes_list, hardware_prefix=hardware_prefix)
         
         # Combine common and tagged machine passes
-        unified_pass_sequence = common_passes_list + machine_passes_list
+        unified_pass_sequence = common_passes_list + tagged_machine_passes
+        
+        # Temporary debug: Count 'none' occurrences
+        none_count = unified_pass_sequence.count("none")
+        if none_count > 0:
+            total_none_sequences += 1
+        total_sequences += 1
+        
+        # Remove 'none' tokens from sequence (they're just placeholders)
+        unified_pass_sequence = [p for p in unified_pass_sequence if p != "none"]
+        
+        # Skip sequences that are too short or empty
+        if len(unified_pass_sequence) == 0:
+            print(f"Skipping sample due to empty unified_pass_sequence. Original entry: {entry}")
+            continue
         
         # Tokenize and pad the unified sequence
-        unified_pass_sequence_tensor = tokenize_and_pad(unified_pass_sequence, joint_pass_vocab, max_seq_len)
+        # Input sequence: <sos> + passes (for teacher forcing during training)
+        input_token_ids = [joint_pass_vocab["<sos>"]]
+        input_token_ids.extend([joint_pass_vocab.get(p, joint_pass_vocab["<unk>"]) for p in unified_pass_sequence])
+        
+        # Target sequence: passes + <eos> (what we want to predict)
+        target_token_ids = [joint_pass_vocab.get(p, joint_pass_vocab["<unk>"]) for p in unified_pass_sequence]
+        target_token_ids.append(joint_pass_vocab["<eos>"])
+
+        # Pad/truncate to max_seq_len
+        if len(input_token_ids) < max_seq_len:
+            input_token_ids.extend([joint_pass_vocab["<pad>"]] * (max_seq_len - len(input_token_ids)))
+        else:
+            input_token_ids = input_token_ids[:max_seq_len]
+            # Ensure EOS is at the end if truncated, if it was meant to be there
+            if joint_pass_vocab["<eos>"] in input_token_ids:
+                input_token_ids[-1] = joint_pass_vocab["<eos>"]
+
+        if len(target_token_ids) < max_seq_len:
+            target_token_ids.extend([joint_pass_vocab["<pad>"]] * (max_seq_len - len(target_token_ids)))
+        else:
+            target_token_ids = target_token_ids[:max_seq_len]
+            target_token_ids[-1] = joint_pass_vocab["<eos>"] # Ensure EOS is at the end if truncated
+
+        input_sequence_tensor = torch.tensor(input_token_ids, dtype=torch.long)
+        target_sequence_tensor = torch.tensor(target_token_ids, dtype=torch.long)
 
         # Encode hardware
-        hardware_id = hardware_vocab.get(hardware, hardware_vocab["default_hardware"])
+        hardware_id = hardware_vocab.get(hardware, hardware_vocab.get("default_hardware", hardware_vocab["<unk>"]))
         hardware_tensor = torch.tensor(hardware_id, dtype=torch.long)
 
         # Use already scaled program features
@@ -177,13 +271,15 @@ def load_and_preprocess_data(json_data_path, max_seq_len=MAX_PASS_SEQ_LEN, targe
         processed_samples.append({
             'program_features': program_feature_tensor,
             'hardware_id': hardware_tensor,
-            'pass_sequence': unified_pass_sequence_tensor, # Renamed for clarity
+            'input_sequence': input_sequence_tensor,
+            'target_sequence': target_sequence_tensor,
             'labels': labels_tensor
         })
     
     print(f"Processed {len(processed_samples)} samples.")
 
     return processed_samples, feature_scaler, feature_keys, joint_pass_vocab, hardware_vocab, target_metric_scaler
+
 
 # --- Main Execution ---
 
@@ -214,6 +310,10 @@ if __name__ == "__main__":
         json.dump(feature_keys, f, indent=2)
     
     print(f"Preprocessing complete. Artifacts saved to {output_path}")
+    print(f"Total sequences processed: {total_sequences}")
+    print(f"Sequences containing 'none': {total_none_sequences}")
+    if total_sequences > 0:
+        print(f"Percentage of sequences containing 'none': {(total_none_sequences / total_sequences) * 100:.2f}%")
     print("You can now use these artifacts and the processed_samples (if returned) for model training.")
 
     # Example of how to use processed_samples with a PyTorch DataLoader

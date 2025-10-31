@@ -49,6 +49,16 @@ def main():
         type=str,
         help="Path to the directory where the output files will be saved.",
     )
+    parser.add_argument(
+        "--output-json-name",
+        type=str,
+        help="Optional: Custom name for the output flattened JSON file.",
+    )
+    parser.add_argument(
+        "--output-csv-name",
+        type=str,
+        help="Optional: Custom name for the output CSV file.",
+    )
     args = parser.parse_args()
 
     input_path = Path(args.input_file)
@@ -66,14 +76,16 @@ def main():
     flattened_data = flatten_hybrid_json(hybrid_data)
 
     # Save flattened JSON
-    flat_json_path = output_path / f"{input_path.stem}_flat.json"
+    flat_json_name = args.output_json_name if args.output_json_name else f"{input_path.stem}_flat.json"
+    flat_json_path = output_path / flat_json_name
     with open(flat_json_path, 'w') as f:
         json.dump(flattened_data, f, indent=2)
     print(f"Successfully saved flattened JSON to: {flat_json_path}")
 
     # Save as CSV
     df = pd.DataFrame(flattened_data)
-    csv_path = output_path / f"{input_path.stem}.csv"
+    csv_name = args.output_csv_name if args.output_csv_name else f"{input_path.stem}.csv"
+    csv_path = output_path / csv_name
     df.to_csv(csv_path, index=False)
     print(f"Successfully saved CSV file to: {csv_path}")
 

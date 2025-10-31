@@ -110,11 +110,27 @@ class LLVMFeatureExtractor:
     
     def _extract_control_flow_features(self, ir_text: str) -> Dict[str, int]:
         """Extract control flow related features."""
+        # Basic counts
+        num_br = len(re.findall(r'\sbr\s+', ir_text))
+        num_conditional_br = len(re.findall(r'\sbr\s+i1\s+%', ir_text))
+        num_unconditional_br = len(re.findall(r'\sbr\s+label\s+%', ir_text))
+        num_basic_blocks = len(re.findall(r'^[\w\d]+:', ir_text, re.MULTILINE))
+        
+        # Branch density: branches per basic block
+        branch_density = num_br / max(1, num_basic_blocks)
+        
+        # Critical edges estimation:
+        # A critical edge connects a block with multiple successors to a block with multiple predecessors
+        # Approximate by looking at conditional branches leading to blocks with multiple incoming edges
+        # Count PHI nodes with 2+ incoming values as proxy for blocks with multiple predecessors
+        phi_with_multiple_preds = len(re.findall(r'phi\s+\w+.*?\[.*?,.*?\].*?\[', ir_text))
+        critical_edges = min(num_conditional_br, phi_with_multiple_preds)
+        
         return {
             # Branch instructions
-            'num_br': len(re.findall(r'\sbr\s+', ir_text)),
-            'num_conditional_br': len(re.findall(r'\sbr\s+i1\s+%', ir_text)),
-            'num_unconditional_br': len(re.findall(r'\sbr\s+label\s+%', ir_text)),
+            'num_br': num_br,
+            'num_conditional_br': num_conditional_br,
+            'num_unconditional_br': num_unconditional_br,
             
             # Switch and select
             'num_switch': len(re.findall(r'\sswitch\s+', ir_text)),
@@ -129,10 +145,27 @@ class LLVMFeatureExtractor:
             
             # PHI nodes (indicators of complex control flow)
             'num_phi': len(re.findall(r'\sphi\s+', ir_text)),
+            
+            # Derived control flow metrics
+            'branch_density': branch_density,
+            'critical_edges': critical_edges,
         }
     
     def _extract_memory_features(self, ir_text: str) -> Dict[str, int]:
         """Extract memory operation features."""
+        # Count global variable accesses
+        global_loads = len(re.findall(r'load\s+.*?@\w+', ir_text))
+        global_stores = len(re.findall(r'store\s+.*?@\w+', ir_text))
+        global_accesses = global_loads + global_stores
+        
+        # Estimate alias pairs by counting pointers with similar usage patterns
+        # Count unique pointer variables
+        ptr_vars = set(re.findall(r'%(\w+)\s*=\s*(?:alloca|getelementptr|load.*\*|bitcast.*\*)', ir_text))
+        # Estimate potential aliases as pairs of pointers used in same contexts
+        # This is a rough heuristic: assume 10% of pointer pairs could alias
+        num_ptrs = len(ptr_vars)
+        alias_pairs = (num_ptrs * (num_ptrs - 1)) // 20 if num_ptrs > 1 else 0
+        
         return {
             # Load/Store operations
             'num_load': len(re.findall(r'\sload\s+', ir_text)),
@@ -150,6 +183,10 @@ class LLVMFeatureExtractor:
             'num_memcpy': len(re.findall(r'@llvm\.memcpy', ir_text)),
             'num_memset': len(re.findall(r'@llvm\.memset', ir_text)),
             'num_memmove': len(re.findall(r'@llvm\.memmove', ir_text)),
+            
+            # Data flow features
+            'global_accesses': global_accesses,
+            'alias_pairs': alias_pairs,
         }
     
     def _extract_arithmetic_features(self, ir_text: str) -> Dict[str, int]:
@@ -203,9 +240,24 @@ class LLVMFeatureExtractor:
         # (PHI nodes are commonly used in loop headers)
         num_phi = len(re.findall(r'\sphi\s+', ir_text))
         
+        # Estimate loop depth by analyzing PHI nodes per function
+        functions = re.findall(r'define\s+.*?\{(.*?)^\}', ir_text, re.MULTILINE | re.DOTALL)
+        total_loop_depth = 0
+        num_functions_with_loops = 0
+        
+        for func in functions:
+            phi_in_func = len(re.findall(r'\sphi\s+', func))
+            if phi_in_func > 0:
+                # Approximate depth by PHI concentration
+                num_functions_with_loops += 1
+                total_loop_depth += min(phi_in_func, 5)  # Cap at depth 5
+        
+        avg_loop_depth = total_loop_depth / max(1, num_functions_with_loops)
+        
         return {
             'estimated_loops': min(num_phi, len(blocks) // 3),  # Conservative estimate
             'num_back_edges': len([t for t in branch_targets if t in block_set]),
+            'loop_depth_avg': avg_loop_depth,
         }
     
     def _extract_call_features(self, ir_text: str) -> Dict[str, int]:
@@ -219,10 +271,37 @@ class LLVMFeatureExtractor:
         # Tail calls
         tail_calls = len(re.findall(r'tail\s+call', ir_text))
         
+        # Inline candidates: small functions (heuristic based on instruction count)
+        # Functions with fewer instructions are good inline candidates
+        functions = re.findall(r'define\s+.*?\{(.*?)^\}', ir_text, re.MULTILINE | re.DOTALL)
+        inline_candidates = 0
+        for func in functions:
+            inst_count = len(re.findall(r'^\s+%', func, re.MULTILINE))
+            if inst_count > 0 and inst_count < 30:  # Small functions (< 30 instructions)
+                inline_candidates += 1
+        
+        # Call graph edges: unique caller-callee relationships
+        # Extract all function names
+        defined_funcs = set(re.findall(r'define\s+.*?@(\w+)', ir_text))
+        
+        # Count unique call edges
+        call_edges = set()
+        for func_match in re.finditer(r'define\s+.*?@(\w+).*?\{(.*?)^\}', ir_text, re.MULTILINE | re.DOTALL):
+            caller = func_match.group(1)
+            func_body = func_match.group(2)
+            # Find all callees in this function
+            callees = re.findall(r'call\s+.*?@(\w+)', func_body)
+            for callee in callees:
+                call_edges.add((caller, callee))
+        
+        call_graph_edges = len(call_edges)
+        
         return {
             'num_direct_calls': direct_calls,
             'num_indirect_calls': max(0, indirect_calls),
             'num_tail_calls': tail_calls,
+            'inline_candidates': inline_candidates,
+            'call_graph_edges': call_graph_edges,
         }
     
     def _extract_type_features(self, ir_text: str) -> Dict[str, int]:
@@ -278,10 +357,30 @@ class LLVMFeatureExtractor:
         # Branch intensity
         derived['branch_intensity'] = features.get('num_br', 0) / max(1, total_inst)
         
-        # Arithmetic intensity
+        # Arithmetic intensity (arith_ratio)
         total_arith = (features.get('num_add', 0) + features.get('num_sub', 0) + 
                       features.get('num_mul', 0) + features.get('num_div', 0))
         derived['arithmetic_intensity'] = total_arith / max(1, total_inst)
+        derived['arith_ratio'] = derived['arithmetic_intensity']  # Alias for clarity
+        
+        # Logic ratio: logical operations per instruction
+        total_logic = (features.get('num_and', 0) + features.get('num_or', 0) + 
+                      features.get('num_xor', 0) + features.get('num_shl', 0) + 
+                      features.get('num_shr', 0))
+        derived['logic_ratio'] = total_logic / max(1, total_inst)
+        
+        # Memory ratio (mem_ratio)
+        derived['mem_ratio'] = derived['memory_intensity']  # Alias for clarity
+        
+        # Vector ratio: vector operations per instruction
+        vector_uses = features.get('uses_vector', 0)
+        derived['vector_ratio'] = vector_uses / max(1, total_inst)
+        
+        # Floating point operations (combined count)
+        floating_point_ops = (features.get('num_fadd', 0) + features.get('num_fsub', 0) + 
+                             features.get('num_fmul', 0) + features.get('num_fdiv', 0))
+        derived['floating_point_ops'] = floating_point_ops
+        derived['floating_point_ratio'] = floating_point_ops / max(1, total_inst)
         
         # Call intensity
         derived['call_intensity'] = features.get('total_function_calls', 0) / max(1, total_inst)

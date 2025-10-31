@@ -10,7 +10,7 @@ import argparse
 from typing import List, Dict, Any, Tuple
 
 from pass_sequence_generator import PassSequenceGenerator
-from machine_flags_generator import MachineFlagsGenerator
+from machine_flags_generator_v2 import MachineFlagsGeneratorV2 as MachineFlagsGenerator
 
 
 class HybridSequenceGenerator:
@@ -45,14 +45,17 @@ class HybridSequenceGenerator:
         )[0]
         
         # Generate machine config
-        machine_config = self.machine_generator.generate_multiple(
+        machine_result = self.machine_generator.generate_multiple(
             count=1,
-            strategy=machine_strategy
+            vary_abi=False
         )[0]
+        machine_config = machine_result["config"]
+        machine_abi = machine_result["abi"]
         
         return {
             "ir_passes": ir_passes,
             "machine_config": machine_config,
+            "machine_abi": machine_abi,
             "ir_pass_count": len(ir_passes),
             "machine_flag_count": len(machine_config)
         }
@@ -95,6 +98,7 @@ class HybridSequenceGenerator:
         return {
             "ir_passes": ir_passes,
             "machine_config": machine_config,
+            "machine_abi": self.machine_generator.default_abi,
             "focus": focus,
             "ir_pass_count": len(ir_passes),
             "machine_flag_count": len(machine_config)
@@ -174,7 +178,8 @@ class HybridSequenceGenerator:
             opt_command = "-passes=default<O0>"
         
         # Format machine config for llc
-        llc_flags = self.machine_generator.config_to_llc_flags(sequence["machine_config"])
+        machine_abi = sequence.get("machine_abi", self.machine_generator.default_abi)
+        llc_flags = self.machine_generator.config_to_llc_flags(sequence["machine_config"], machine_abi)
         
         return {
             "opt_command": opt_command,

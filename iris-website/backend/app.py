@@ -7,10 +7,10 @@ import os
 import numpy as np
 import json
 
-# Add the parent directory to the Python path to allow importing neuropt
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+# Add the parent directory to the Python path to allow importing iris
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
-from neuropt import load_model, beam_search_decode
+from iris import load_model, beam_search_decode
 
 app = Flask(__name__)
 CORS(app)  # This will enable CORS for all routes
@@ -19,8 +19,8 @@ CORS(app)  # This will enable CORS for all routes
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Construct absolute paths to model and data files
-base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-runtime_model_path = os.path.join(base_dir, 'passformer_runtime.pth')
+base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+runtime_model_path = os.path.join(base_dir, 'passformer_binary_size.pth')
 data_path = os.path.join(base_dir, 'tools', 'training_data', 'training_data_flat.json')
 
 runtime_model, runtime_vocab, runtime_feature_keys, runtime_feature_scaler = load_model(runtime_model_path, device)

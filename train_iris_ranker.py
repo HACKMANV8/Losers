@@ -8,7 +8,7 @@ from sklearn.preprocessing import StandardScaler
 import math
 import argparse
 
-# --- Configuration ---
+
 CONFIG = {
     "d_model": 128,
     "nhead": 4,
@@ -18,13 +18,13 @@ CONFIG = {
     "lr": 0.001,
     "epochs": 10,
     "batch_size": 32,
-    "target_metric": "runtime",  # "runtime" or "binary_size"
+    "target_metric": "runtime",  
     "max_seq_len": 64,
     "val_split": 0.2,
     "dropout": 0.1,
 }
 
-# --- Dataset and DataLoader ---
+
 
 def parse_features(feature_dict):
     """Converts a dictionary of features into a dictionary of floats."""
@@ -56,13 +56,12 @@ class PassSequenceDataset(Dataset):
         if not data:
             return
 
-        # First pass to establish feature keys consistently
         first_features = parse_features(data[0]['program_features'])
         self.feature_keys = sorted(first_features.keys())
 
         for entry in data:
             features = parse_features(entry['program_features'])
-            # Ensure consistent feature order
+ 
             ordered_features = [features.get(k, 0.0) for k in self.feature_keys]
 
             self.samples.append({
@@ -87,7 +86,6 @@ class PassSequenceDataset(Dataset):
             seq = sample['sequence']
             token_ids = [self.pass_vocab.get(p, self.pass_vocab['<unk>']) for p in seq]
 
-            # Pad or truncate
             if len(token_ids) < self.max_seq_len:
                 token_ids.extend([self.pass_vocab['<pad>']] * (self.max_seq_len - len(token_ids)))
             else:
@@ -108,7 +106,7 @@ class PassSequenceDataset(Dataset):
             scaled_features = self.feature_scaler.fit_transform(all_features)
             for i, sample in enumerate(self.samples):
                 sample['features_scaled'] = torch.tensor(scaled_features[i], dtype=torch.float32)
-        else: # Handle case with no features
+        else: 
              for i, sample in enumerate(self.samples):
                 sample['features_scaled'] = torch.zeros(self.num_features, dtype=torch.float32)
 
@@ -123,7 +121,7 @@ class PassSequenceDataset(Dataset):
             torch.tensor(sample['metric'], dtype=torch.float32)
         )
 
-# --- Model Architecture ---
+
 
 class PositionalEncoding(nn.Module):
     """Injects positional information into the input sequence."""
@@ -157,7 +155,7 @@ class PassRanker(nn.Module):
         encoder_layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward, dropout, batch_first=True)
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_encoder_layers)
 
-        # MLP for program features
+
         mlp_layers = []
         input_dim = num_features
         for layer_dim in feature_mlp_layers:
@@ -167,7 +165,7 @@ class PassRanker(nn.Module):
             input_dim = layer_dim
         self.feature_mlp = nn.Sequential(*mlp_layers)
 
-        # Fusion and regression head
+
         self.fusion_dim = d_model + (feature_mlp_layers[-1] if feature_mlp_layers else 0)
         self.regression_head = nn.Sequential(
             nn.Linear(self.fusion_dim, self.fusion_dim // 2),
@@ -176,45 +174,54 @@ class PassRanker(nn.Module):
         )
 
     def forward(self, features, sequence_tokens):
-        # Process sequence
+
         seq_emb = self.pass_embedding(sequence_tokens) * math.sqrt(self.d_model)
         seq_emb = self.pos_encoder(seq_emb)
         
-        # Create padding mask
-        padding_mask = (sequence_tokens == 0) # Assumes <pad> token is 0
+
+        padding_mask = (sequence_tokens == 0)
         
         transformer_out = self.transformer_encoder(seq_emb, src_key_padding_mask=padding_mask)
         
-        # Aggregate transformer output (mean pooling over non-padded tokens)
+
         mask_expanded = ~padding_mask.unsqueeze(-1).expand_as(transformer_out)
         seq_representation = (transformer_out * mask_expanded).sum(1) / mask_expanded.sum(1)
 
-        # Process features
+
         feature_representation = self.feature_mlp(features)
 
-        # Fuse and predict
+
         fused = torch.cat((seq_representation, feature_representation), dim=1)
         prediction = self.regression_head(fused)
         
         return prediction.squeeze(-1)
 
 
-# --- Training Loop ---
+
+
+import os
 
 def train_model(config):
     """Main function to orchestrate model training."""
     print("--- NeuroOpt PassRanker Training ---")
     print(f"Configuration: {config}")
 
-    # Set device
+
+    log_dir = f'runs/passranker_{config["target_metric"]}'
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, 'training_log.csv')
+    with open(log_file, 'w') as f:
+        f.write('epoch,train_loss,val_loss\n')
+
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # Load data
+
     with open('tools/training_data/training_data_flat.json', 'r') as f:
         json_data = json.load(f)
 
-    # Create dataset
+
     dataset = PassSequenceDataset(
         data=json_data,
         target_metric=config['target_metric'],
@@ -225,7 +232,7 @@ def train_model(config):
         print("Dataset is empty. No data to train on. Exiting.")
         return
 
-    # Split data
+
     val_size = int(len(dataset) * config['val_split'])
     train_size = len(dataset) - val_size
     train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
@@ -237,7 +244,6 @@ def train_model(config):
     print(f"Number of features: {dataset.num_features}")
     print(f"Training on {train_size} samples, validating on {val_size} samples.")
 
-    # Initialize model
     model = PassRanker(
         vocab_size=dataset.vocab_size,
         num_features=dataset.num_features,
@@ -250,12 +256,11 @@ def train_model(config):
         dropout=config['dropout']
     ).to(device)
 
-    # Loss, optimizer, and scheduler
     loss_fn = nn.MSELoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=config['lr'])
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.5)
 
-    # Training loop
+
     for epoch in range(config['epochs']):
         model.train()
         total_train_loss = 0
@@ -272,7 +277,7 @@ def train_model(config):
 
         avg_train_loss = total_train_loss / len(train_loader)
 
-        # Validation loop
+
         model.eval()
         total_val_loss = 0
         with torch.no_grad():
@@ -285,11 +290,24 @@ def train_model(config):
         avg_val_loss = total_val_loss / len(val_loader)
         
         print(f"Epoch {epoch+1}/{config['epochs']} | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
+        
+
+        with open(log_file, 'a') as f:
+            f.write(f'{epoch+1},{avg_train_loss},{avg_val_loss}\n')
+
+        checkpoint_path = os.path.join(log_dir, f'checkpoint_epoch_{epoch+1}.pth')
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'loss': avg_val_loss,
+        }, checkpoint_path)
+
         scheduler.step()
 
     print("--- Training Complete ---")
 
-    # Save the model and supplementary data
+
     model_save_path = f'passranker_{config["target_metric"]}.pth'
     torch.save({
         'model_state_dict': model.state_dict(),
@@ -309,7 +327,7 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    # Update config with CLI arguments
+
     config = CONFIG.copy()
     config.update(vars(args))
 

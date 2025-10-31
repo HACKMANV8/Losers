@@ -422,6 +422,7 @@ def extract_features_from_c_source(c_file: str, output_bc: str = None,
     Returns:
         Dictionary of extracted features
     """
+    clang_path = "C:\\Program Files\\LLVM\\bin\\clang.exe"
     c_path = Path(c_file)
     
     if not c_path.exists():
@@ -432,7 +433,7 @@ def extract_features_from_c_source(c_file: str, output_bc: str = None,
         output_bc = c_path.with_suffix('.bc')
     
     # Build clang command with target flags
-    clang_cmd = ['clang']
+    clang_cmd = [clang_path]
     if target_arch == "riscv64":
         clang_cmd.extend(['--target=riscv64-unknown-linux-gnu'])
     elif target_arch == "riscv32":

@@ -55,9 +55,9 @@ DUMMY_DATA = """
 
 # --- Dataset and DataLoader ---
 
-def parse_features(feature_str):
-    """Parses 'key=value,key=value' string into a dictionary of floats."""
-    return {k: float(v) for k, v in (item.split('=') for item in feature_str.split(','))}
+def parse_features(feature_dict):
+    """Converts a dictionary of features into a dictionary of floats."""
+    return {k: float(v) for k, v in feature_dict.items()}
 
 class PassSequenceDataset(Dataset):
     """
@@ -85,20 +85,19 @@ class PassSequenceDataset(Dataset):
             return
 
         # First pass to establish feature keys consistently
-        first_features = parse_features(data[0]['features'])
+        first_features = parse_features(data[0]['program_features'])
         self.feature_keys = sorted(first_features.keys())
 
         for entry in data:
-            features = parse_features(entry['features'])
+            features = parse_features(entry['program_features'])
             # Ensure consistent feature order
             ordered_features = [features.get(k, 0.0) for k in self.feature_keys]
 
-            for i, seq in enumerate(entry['sequences']):
-                self.samples.append({
-                    'features': np.array(ordered_features, dtype=np.float32),
-                    'sequence': seq,
-                    'metric': entry[self.target_metric][i]
-                })
+            self.samples.append({
+                'features': np.array(ordered_features, dtype=np.float32),
+                'sequence': entry['pass_sequence'],
+                'metric': entry[self.target_metric]
+            })
 
     def _build_vocab(self):
         """Builds a vocabulary of all unique compiler passes."""
@@ -246,7 +245,8 @@ def train_model():
     # In a real scenario, you would load from a file:
     # with open('tools/training_data/training_data.json', 'r') as f:
     #     json_data = json.load(f)
-    json_data = json.load(io.StringIO(DUMMY_DATA))
+    with open('tools/training_data/training_data_flat.json', 'r') as f:
+        json_data = json.load(f)
 
     # Create dataset
     dataset = PassSequenceDataset(

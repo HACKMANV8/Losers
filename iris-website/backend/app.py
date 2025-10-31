@@ -143,6 +143,7 @@ def api_optimize():
         try:
             # Assuming extract_features_from_c_source can handle the target_arch
             # For now, we'll use 'riscv64' as default, but this could be an input parameter
+            # Note: extract_features_from_c_source returns features dict directly
             extracted_features = extract_features_from_c_source(temp_file_path, target_arch='riscv64')
         except RuntimeError as e:
             return jsonify({
@@ -168,9 +169,10 @@ def api_optimize():
         if model_selection == 'transformer':
             try:
                 # The beam_search_decode function now expects raw_features_dict and feature_keys
+                # extracted_features is already the features dict (not wrapped)
                 predicted_passes = beam_search_decode(
                     runtime_model,
-                    extracted_features['features'], # Pass the actual features dictionary
+                    extracted_features,  # Pass the features dictionary directly
                     runtime_feature_keys,
                     runtime_feature_scaler,
                     runtime_vocab,
@@ -181,7 +183,7 @@ def api_optimize():
                     'success': False,
                     'model_used': 'transformer',
                     'predicted_passes': None,
-                    'features': extracted_features['features'],
+                    'features': extracted_features,
                     'processing_time_ms': (time.time() - start_time) * 1000,
                     'error': f"Transformer model inference failed: {str(e)}"
                 }), 500
@@ -191,14 +193,14 @@ def api_optimize():
                     'success': False,
                     'model_used': 'xgboost',
                     'predicted_passes': None,
-                    'features': extracted_features['features'],
+                    'features': extracted_features,
                     'processing_time_ms': (time.time() - start_time) * 1000,
                     'error': 'XGBoost model is not available.'
                 }), 503 # Service Unavailable
 
             try:
                 # Convert features to a pandas DataFrame in the correct order
-                features_df = pd.DataFrame([extracted_features['features']], columns=runtime_feature_keys)
+                features_df = pd.DataFrame([extracted_features], columns=runtime_feature_keys)
                 
                 # Run XGBoost inference
                 # The prediction is assumed to be a string of space-separated pass names
@@ -210,7 +212,7 @@ def api_optimize():
                     'success': False,
                     'model_used': 'xgboost',
                     'predicted_passes': None,
-                    'features': extracted_features['features'],
+                    'features': extracted_features,
                     'processing_time_ms': (time.time() - start_time) * 1000,
                     'error': f"XGBoost model inference failed: {str(e)}"
                 }), 500
@@ -220,7 +222,7 @@ def api_optimize():
             'success': True,
             'model_used': model_selection,
             'predicted_passes': predicted_passes,
-            'features': extracted_features['features'],
+            'features': extracted_features,
             'processing_time_ms': (time.time() - start_time) * 1000,
             'error': None
         }), 200

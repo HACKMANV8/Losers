@@ -68,6 +68,17 @@ export default function Demo() {
     downloadAnchorNode.remove();
   };
 
+  const copyPasses = () => {
+    if (!results || !results.predicted_passes) return;
+    const passesString = results.predicted_passes.join(', ');
+    navigator.clipboard.writeText(passesString).then(() => {
+      // Optional: Show a brief success message
+      alert('Passes copied to clipboard!');
+    }).catch(err => {
+      console.error('Failed to copy passes:', err);
+    });
+  };
+
   const handleClear = () => {
     setFile(null);
     setResults(null);
@@ -186,14 +197,10 @@ export default function Demo() {
                 </div>
 
                 {/* Summary Card */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-                  <div className="bg-gray-50 dark:bg-gray-700 p-4 rounded-lg">
+                <div className="mb-6">
+                  <div className="bg-gray-50 dark:bg-gray-700 p-4 rounded-lg inline-block">
                     <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Model Used</p>
                     <p className="text-lg font-semibold text-indigo-600 dark:text-indigo-300 capitalize">{results.model_used}</p>
-                  </div>
-                  <div className="bg-gray-50 dark:bg-gray-700 p-4 rounded-lg">
-                    <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Processing Time</p>
-                    <p className="text-lg font-semibold">{results.processing_time_ms.toFixed(2)} ms</p>
                   </div>
                 </div>
 
@@ -201,7 +208,10 @@ export default function Demo() {
                 <div className="bg-gray-50 dark:bg-gray-700 p-4 rounded-lg mb-6">
                   <div className="flex justify-between items-center mb-3">
                     <h3 className="text-lg font-semibold">Predicted Pass Sequence</h3>
-                    <button onClick={downloadResults} className="text-sm font-medium text-indigo-600 hover:text-indigo-500">Download</button>
+                    <div className="flex gap-3">
+                      <button onClick={copyPasses} className="text-sm font-medium text-green-600 hover:text-green-500 dark:text-green-400 dark:hover:text-green-300">Copy</button>
+                      <button onClick={downloadResults} className="text-sm font-medium text-indigo-600 hover:text-indigo-500">Download</button>
+                    </div>
                   </div>
                   <div className="flex flex-wrap gap-2">
                     {results.predicted_passes.map((pass: string, index: number) => (

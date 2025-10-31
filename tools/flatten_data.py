@@ -15,22 +15,24 @@ def flatten_hybrid_json(data):
         flat_record = {
             'program': entry['program'],
             'sequence_id': entry['sequence_id'],
-            'pass_sequence': ' '.join(entry['ir_passes']),
+            'common_passes': ' '.join(entry['ir_passes']), # Renamed from pass_sequence
             'execution_time': entry['execution_time'],
             'binary_size': entry['binary_size'],
         }
 
-        # Flatten features
-        for key, value in entry['features'].items():
-            flat_record[f'feature_{key}'] = value
+        # Store features as a dictionary under 'program_features'
+        flat_record['program_features'] = entry['features']
 
-        # Flatten machine_config
-        for key, value in entry['machine_config'].items():
-            if isinstance(value, dict):
-                for sub_key, sub_value in value.items():
-                    flat_record[f'machine_{key}_{sub_key}'] = sub_value
-            else:
-                flat_record[f'machine_{key}'] = value
+        # Aggregate machine_config into 'machine_passes'
+        machine_passes_list = []
+        machine_config = entry.get('machine_config', {})
+        if 'abi' in machine_config:
+            machine_passes_list.append(f"abi_{machine_config['abi']}")
+        if 'config' in machine_config and isinstance(machine_config['config'], dict):
+            for flag, is_set in machine_config['config'].items():
+                if is_set:
+                    machine_passes_list.append(f"flag_{flag}")
+        flat_record['machine_passes'] = ' '.join(machine_passes_list) if machine_passes_list else "none"
 
         flattened_data.append(flat_record)
     return flattened_data

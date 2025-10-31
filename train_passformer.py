@@ -18,7 +18,7 @@ CONFIG = {
     "lr": 0.001,
     "epochs": 10,
     "batch_size": 32,
-    "target_metric": "runtimes",  # "runtimes" or "binary_sizes"
+    "target_metric": "binary_size",  # "runtime" or "binary_size"
     "max_seq_len": 64,
     "val_split": 0.2,
     "dropout": 0.1,
@@ -61,7 +61,8 @@ def parse_features(feature_dict):
 
 class PassSequenceDataset(Dataset):
     """
-    Dataset for compiler pass sequences and program features.
+    Dataset for the NeuroOpt task.
+    Each sample consists of program features and the best-performing pass sequence.
     """
     def __init__(self, data, target_metric, max_seq_len):
         super().__init__()
@@ -69,7 +70,7 @@ class PassSequenceDataset(Dataset):
         self.max_seq_len = max_seq_len
 
         self.samples = []
-        self.pass_vocab = {'<pad>': 0, '<unk>': 1}
+        self.pass_vocab = {'<pad>': 0, '<unk>': 1, '<sos>': 2, '<eos>': 3}
         self.feature_keys = []
 
         self._process_data(data)
@@ -80,23 +81,31 @@ class PassSequenceDataset(Dataset):
         self._normalize_features()
 
     def _process_data(self, data):
-        """Expands the JSON data into individual samples."""
+        """Groups data by program and finds the best sequence for each."""
         if not data:
             return
 
-        # First pass to establish feature keys consistently
-        first_features = parse_features(data[0]['program_features'])
-        self.feature_keys = sorted(first_features.keys())
-
+        # Group samples by program
+        programs = {}
         for entry in data:
-            features = parse_features(entry['program_features'])
-            # Ensure consistent feature order
+            prog_name = entry['program']
+            if prog_name not in programs:
+                programs[prog_name] = []
+            programs[prog_name].append(entry)
+
+        # Find the best sequence for each program
+        for prog_name, entries in programs.items():
+            best_entry = min(entries, key=lambda x: x[self.target_metric])
+            
+            features = parse_features(best_entry['program_features'])
+            if not self.feature_keys:
+                self.feature_keys = sorted(features.keys())
+
             ordered_features = [features.get(k, 0.0) for k in self.feature_keys]
 
             self.samples.append({
                 'features': np.array(ordered_features, dtype=np.float32),
-                'sequence': entry['pass_sequence'],
-                'metric': entry[self.target_metric]
+                'sequence': best_entry['pass_sequence']
             })
 
     def _build_vocab(self):
@@ -110,16 +119,19 @@ class PassSequenceDataset(Dataset):
         self.vocab_size = len(self.pass_vocab)
 
     def _tokenize_sequences(self):
-        """Converts pass sequences to token IDs with padding/truncation."""
+        """Converts pass sequences to token IDs with padding/truncation and SOS/EOS."""
         for sample in self.samples:
             seq = sample['sequence']
-            token_ids = [self.pass_vocab.get(p, self.pass_vocab['<unk>']) for p in seq]
+            token_ids = [self.pass_vocab['<sos>']]
+            token_ids.extend([self.pass_vocab.get(p, self.pass_vocab['<unk>']) for p in seq])
+            token_ids.append(self.pass_vocab['<eos>'])
 
             # Pad or truncate
             if len(token_ids) < self.max_seq_len:
                 token_ids.extend([self.pass_vocab['<pad>']] * (self.max_seq_len - len(token_ids)))
             else:
                 token_ids = token_ids[:self.max_seq_len]
+                token_ids[-1] = self.pass_vocab['<eos>'] # Ensure EOS is the last token
 
             sample['sequence_tokens'] = torch.tensor(token_ids, dtype=torch.long)
 
@@ -148,8 +160,7 @@ class PassSequenceDataset(Dataset):
         sample = self.samples[idx]
         return (
             sample['features_scaled'],
-            sample['sequence_tokens'],
-            torch.tensor(sample['metric'], dtype=torch.float32)
+            sample['sequence_tokens']
         )
 
 # --- Model Architecture ---

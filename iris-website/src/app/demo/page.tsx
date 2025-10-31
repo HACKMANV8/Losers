@@ -2,6 +2,7 @@
 
 import { useState, useCallback } from 'react';
 import { useDropzone } from 'react-dropzone';
+import { useRouter } from 'next/navigation';
 import Layout from '../components/Layout';
 
 // --- Icon Components ---
@@ -35,7 +36,9 @@ const Spinner = () => (
 );
 
 export default function Demo() {
+  const router = useRouter();
   const [file, setFile] = useState<File | null>(null);
+  const [fileContent, setFileContent] = useState<string>('');
   const [model, setModel] = useState('transformer');
   const [loading, setLoading] = useState(false);
   const [results, setResults] = useState<any>(null);
@@ -43,9 +46,18 @@ export default function Demo() {
 
   const onDrop = useCallback((acceptedFiles: File[]) => {
     if (acceptedFiles.length > 0) {
-      setFile(acceptedFiles[0]);
+      const uploadedFile = acceptedFiles[0];
+      setFile(uploadedFile);
       setError(null);
       setResults(null);
+      
+      // Read file content
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const content = e.target?.result as string;
+        setFileContent(content);
+      };
+      reader.readAsText(uploadedFile);
     }
   }, []);
 
@@ -81,8 +93,30 @@ export default function Demo() {
 
   const handleClear = () => {
     setFile(null);
+    setFileContent('');
     setResults(null);
     setError(null);
+  };
+
+  const handleComparePerformance = () => {
+    if (!results || !file || !fileContent) return;
+    
+    // Prepare data for comparison page
+    const comparisonData = {
+      sourceCode: fileContent,
+      fileName: file.name,
+      predictedPasses: results.predicted_passes,
+      features: results.features,
+      modelUsed: results.model_used,
+      processingTime: results.processing_time_ms,
+      timestamp: Date.now()
+    };
+    
+    // Store in sessionStorage as backup
+    sessionStorage.setItem('iris_comparison_data', JSON.stringify(comparisonData));
+    
+    // Navigate to comparison page with state
+    router.push('/comparison?from=demo');
   };
 
   const handleSubmit = async () => {
@@ -119,127 +153,122 @@ export default function Demo() {
 
   return (
     <Layout>
-      <div className="min-h-screen bg-gray-100 dark:bg-gray-900 text-gray-900 dark:text-gray-100 p-4 flex items-center justify-center">
-        <main className="max-w-2xl w-full mx-auto">
-          <div className="bg-white dark:bg-gray-800 p-8 rounded-lg shadow-2xl transition-all duration-300">
+      <main className="min-h-screen p-6 flex items-center justify-center">
+        <article className="max-w-2xl w-full glass-strong p-8 animate-scale-in">
             
             {!results && (
-              <div className="animate-fade-in">
-                <h1 className="text-4xl font-bold mb-6 text-center text-gray-800 dark:text-white">IRis Optimizer</h1>
+              <>
+                <h1 className="text-4xl font-bold mb-8 text-center text-white drop-shadow-lg">IRis Optimizer</h1>
                 
-                {/* File Upload Area */}
-                <div
+                <label
                   {...getRootProps()}
-                  className={`border-2 border-dashed rounded-lg p-10 text-center cursor-pointer transition-colors duration-300 ${
-                    isDragActive
-                      ? 'border-indigo-500 bg-indigo-50 dark:bg-indigo-900/20'
-                      : 'border-gray-300 dark:border-gray-600 hover:border-indigo-400 dark:hover:border-indigo-500'
+                  className={`border-2 border-dashed rounded-2xl p-12 text-center cursor-pointer transition-all glass block ${
+                    isDragActive ? 'border-white/60 bg-white/20 scale-105' : 'border-white/30 hover:border-white/50 hover:bg-white/10'
                   }`}>
                   <input {...getInputProps()} />
-                  {isDragActive ? (
-                    <p className="text-indigo-600 dark:text-indigo-300">Drop the file here ...</p>
-                  ) : (
-                    <p className="text-gray-500 dark:text-gray-400">Drag & drop a C/C++ file here, or click to select</p>
-                  )}
-                </div>
-
-                {/* File Preview */}
-                {file && (
-                  <div className="mt-4 p-4 bg-gray-50 dark:bg-gray-700 rounded-lg">
-                    <p className="font-semibold text-gray-700 dark:text-gray-200">Uploaded File:</p>
-                    <p className="text-sm text-gray-600 dark:text-gray-300">{file.name} - {(file.size / 1024).toFixed(2)} KB</p>
+                  <div className="flex flex-col items-center justify-center">
+                    <p className="text-white font-medium text-xl">
+                      {isDragActive ? 'Drop the file here...' : 'Drag & drop a C/C++ file, or click to select'}
+                    </p>
                   </div>
+                </label>
+
+                {file && (
+                  <p className="mt-6 p-5 glass-card rounded-2xl text-white text-center">
+                    <strong className="font-bold">{file.name}</strong>
+                    <span className="block mt-2 text-white/80">{(file.size / 1024).toFixed(2)} KB</span>
+                  </p>
                 )}
 
-                {/* Model Selector */}
-                <div className="mt-6">
-                  <p className="font-semibold text-gray-700 dark:text-gray-200 mb-2">Select Model:</p>
-                  <div className="flex space-x-4">
-                    <label className="flex items-center cursor-pointer">
-                      <input type="radio" name="model" value="transformer" checked={model === 'transformer'} onChange={() => setModel('transformer')} className="form-radio h-5 w-5 text-indigo-600" />
-                      <span className="ml-2 text-gray-700 dark:text-gray-300">Transformer</span>
+                <fieldset className="mt-8">
+                  <legend className="font-bold text-white text-xl mb-4">Select Model</legend>
+                  <div className="flex flex-col md:flex-row gap-4">
+                    <label className="flex items-center cursor-pointer glass-card px-6 py-4 rounded-xl hover:bg-white/20 transition-all flex-1">
+                      <input type="radio" name="model" value="transformer" checked={model === 'transformer'} onChange={() => setModel('transformer')} className="mr-4 h-5 w-5" />
+                      <span className="text-white font-bold text-lg">Transformer</span>
                     </label>
-                    <label className="flex items-center cursor-pointer">
-                      <input type="radio" name="model" value="xgboost" checked={model === 'xgboost'} onChange={() => setModel('xgboost')} className="form-radio h-5 w-5 text-indigo-600" />
-                      <span className="ml-2 text-gray-700 dark:text-gray-300">XGBoost</span>
+                    <label className="flex items-center cursor-pointer glass-card px-6 py-4 rounded-xl hover:bg-white/20 transition-all flex-1">
+                      <input type="radio" name="model" value="xgboost" checked={model === 'xgboost'} onChange={() => setModel('xgboost')} className="mr-4 h-5 w-5" />
+                      <span className="text-white font-bold text-lg">XGBoost</span>
                     </label>
                   </div>
-                </div>
+                </fieldset>
 
-                {/* Submit Button */}
                 <button 
                   onClick={handleSubmit} 
                   disabled={!file || loading}
-                  className="w-full mt-8 px-8 py-3 text-lg font-medium text-white bg-indigo-600 rounded-md hover:bg-indigo-700 disabled:bg-gray-400 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 dark:focus:ring-offset-gray-900 transition-all duration-300 flex items-center justify-center">
-                  {loading ? <Spinner /> : 'Optimize'}
+                  className="w-full mt-10 px-8 py-5 text-xl font-bold text-white bg-gradient-to-r from-indigo-500 to-purple-600 rounded-2xl hover:from-indigo-600 hover:to-purple-700 disabled:opacity-50 disabled:cursor-not-allowed shadow-2xl hover:scale-105 transition-all duration-300">
+                  {loading ? <Spinner /> : 'Optimize Code'}
                 </button>
-              </div>
+              </>
             )}
 
-            {/* Error Display */}
             {error && (
-              <div className="mt-4 p-4 bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300 rounded-lg animate-fade-in">
-                <p><span className="font-bold">Error:</span> {error}</p>
-                <button onClick={handleClear} className="mt-4 px-4 py-2 text-sm font-medium text-white bg-gray-600 rounded-md hover:bg-gray-700">
-                  Try Again
-                </button>
-              </div>
-            )}
-
-            {/* --- Enhanced Results Display --- */}
-            {results && (
-              <div className="animate-fade-in">
-                <div className="flex justify-between items-center mb-4">
-                  <h2 className="text-2xl font-bold text-gray-800 dark:text-white">Optimization Results</h2>
-                  <button onClick={handleClear} className="px-4 py-2 text-sm font-medium text-white bg-gray-600 rounded-md hover:bg-gray-700">
-                    Optimize New File
+              <aside className="p-8 glass-card rounded-2xl border-2 border-red-400/50 animate-fade-in">
+                <div className="text-center">
+                  <span className="text-4xl block mb-4">⚠️</span>
+                  <h2 className="text-2xl font-bold text-white mb-2">Error</h2>
+                  <p className="text-white mb-6">{error}</p>
+                  <button onClick={handleClear} className="px-8 py-3 font-bold text-white bg-white/20 rounded-xl hover:bg-white/30 transition-all">
+                    Try Again
                   </button>
                 </div>
-
-                {/* Summary Card */}
-                <div className="mb-6">
-                  <div className="bg-gray-50 dark:bg-gray-700 p-4 rounded-lg inline-block">
-                    <p className="text-sm font-medium text-gray-500 dark:text-gray-400">Model Used</p>
-                    <p className="text-lg font-semibold text-indigo-600 dark:text-indigo-300 capitalize">{results.model_used}</p>
-                  </div>
-                </div>
-
-                {/* Pass Sequence Card */}
-                <div className="bg-gray-50 dark:bg-gray-700 p-4 rounded-lg mb-6">
-                  <div className="flex justify-between items-center mb-3">
-                    <h3 className="text-lg font-semibold">Predicted Pass Sequence</h3>
-                    <div className="flex gap-3">
-                      <button onClick={copyPasses} className="text-sm font-medium text-green-600 hover:text-green-500 dark:text-green-400 dark:hover:text-green-300">Copy</button>
-                      <button onClick={downloadResults} className="text-sm font-medium text-indigo-600 hover:text-indigo-500">Download</button>
-                    </div>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    {results.predicted_passes.map((pass: string, index: number) => (
-                      <div key={index} className="flex items-center px-3 py-1 bg-indigo-100 dark:bg-indigo-900/50 text-indigo-800 dark:text-indigo-200 rounded-full text-sm font-medium">
-                        {getPassIcon(pass)}
-                        <span>{pass}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Extracted Features Card */}
-                <div className="bg-gray-50 dark:bg-gray-700 p-4 rounded-lg">
-                  <h3 className="text-lg font-semibold mb-3">Extracted Program Features</h3>
-                  <div className="grid grid-cols-2 md:grid-cols-3 gap-4 text-sm">
-                    {Object.entries(results.features).map(([key, value]) => (
-                      <div key={key} className="flex flex-col">
-                        <span className="font-medium text-gray-500 dark:text-gray-400 capitalize">{key.replace(/_/g, ' ')}</span>
-                        <span className="font-semibold text-lg">{typeof value === 'number' ? value.toFixed(2) : String(value)}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
+              </aside>
             )}
-          </div>
-        </main>
-      </div>
+
+            {results && (
+              <>
+                <header className="flex justify-between items-center mb-8 animate-slide-in">
+                  <h2 className="text-3xl font-bold text-white">Optimization Results</h2>
+                  <button onClick={handleClear} className="px-6 py-3 font-bold text-white bg-white/20 rounded-xl hover:bg-white/30 transition-all hover:scale-105">
+                    New File
+                  </button>
+                </header>
+
+                <div className="glass-card p-6 rounded-2xl mb-6 animate-fade-in">
+                  <h3 className="text-xl font-bold text-white mb-3">Model Used</h3>
+                  <p className="text-2xl font-bold text-white capitalize">{results.model_used}</p>
+                </div>
+
+                <section className="glass-card p-6 rounded-2xl mb-6 animate-slide-in">
+                  <header className="flex justify-between items-center mb-4">
+                    <h3 className="text-xl font-bold text-white">Predicted Pass Sequence</h3>
+                    <nav className="flex gap-3">
+                      <button onClick={copyPasses} className="font-bold text-white bg-green-500/30 hover:bg-green-500/50 px-4 py-2 rounded-xl transition-all hover:scale-105">Copy</button>
+                      <button onClick={downloadResults} className="font-bold text-white bg-indigo-500/30 hover:bg-indigo-500/50 px-4 py-2 rounded-xl transition-all hover:scale-105">Download</button>
+                    </nav>
+                  </header>
+                  <ul className="flex flex-wrap gap-3">
+                    {results.predicted_passes.map((pass: string, index: number) => (
+                      <li key={index} className="flex items-center px-4 py-2 bg-white/20 hover:bg-white/30 text-white rounded-xl font-medium transition-all hover:scale-105">
+                        {getPassIcon(pass)}
+                        <span className="ml-2">{pass}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+
+                <section className="glass-card p-6 rounded-2xl animate-slide-in">
+                  <h3 className="text-xl font-bold text-white mb-4">Extracted Features</h3>
+                  <dl className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                    {Object.entries(results.features).map(([key, value]) => (
+                      <div key={key} className="glass p-4 rounded-xl hover:bg-white/15">
+                        <dt className="text-white/80 capitalize text-sm font-medium">{key.replace(/_/g, ' ')}</dt>
+                        <dd className="font-bold text-white text-xl mt-1">{typeof value === 'number' ? value.toFixed(2) : String(value)}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                </section>
+
+                <button 
+                  onClick={handleComparePerformance}
+                  className="w-full mt-8 px-8 py-5 text-xl font-bold text-white bg-gradient-to-r from-pink-500 to-rose-600 rounded-2xl hover:from-pink-600 hover:to-rose-700 shadow-2xl hover:scale-105 transition-all duration-300 animate-fade-in">
+                  ⚡ Compare Performance
+                </button>
+              </>
+            )}
+        </article>
+      </main>
     </Layout>
   );
 }

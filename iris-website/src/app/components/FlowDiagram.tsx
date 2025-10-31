@@ -2,29 +2,51 @@
 
 const FlowDiagram = () => {
   return (
-    <div className="flex items-center justify-center space-x-4 text-sm text-gray-500 dark:text-gray-400">
+    <div className="flex flex-wrap items-center justify-center gap-4 md:gap-6 text-sm animate-fade-in">
       <div className="flex flex-col items-center">
-        <div className="p-4 bg-gray-200 dark:bg-gray-700 rounded-lg">Source Code</div>
+        <div className="glass-card p-4 rounded-xl min-w-[120px] text-center transition-all hover:scale-105">
+          <span className="text-white font-medium">Source Code</span>
+        </div>
       </div>
-      <div>&rarr;</div>
+      
+      <div className="text-white/60 self-center">→</div>
+      
       <div className="flex flex-col items-center">
-        <div className="p-4 bg-gray-200 dark:bg-gray-700 rounded-lg">LLVM IR</div>
+        <div className="glass-card p-4 rounded-xl min-w-[120px] text-center transition-all hover:scale-105">
+          <span className="text-white font-medium">LLVM IR</span>
+        </div>
       </div>
-      <div>&rarr;</div>
+      
+      <div className="text-white/60 self-center">→</div>
+      
       <div className="flex flex-col items-center">
-        <div className="p-4 bg-gray-200 dark:bg-gray-700 rounded-lg">Feature Extraction</div>
+        <div className="glass-card p-4 rounded-xl min-w-[120px] text-center transition-all hover:scale-105">
+          <span className="text-white font-medium">Features</span>
+        </div>
       </div>
-      <div>&rarr;</div>
+      
+      <div className="text-white/60 self-center">→</div>
+      
       <div className="flex flex-col items-center">
-        <div className="p-4 bg-indigo-200 dark:bg-indigo-700 rounded-lg">ML Model</div>
+        <div className="glass-card p-4 rounded-xl min-w-[120px] text-center bg-indigo-500/20 transition-all hover:scale-105">
+          <span className="text-white font-bold">ML Model</span>
+        </div>
       </div>
-      <div>&rarr;</div>
+      
+      <div className="text-white/60 self-center">→</div>
+      
       <div className="flex flex-col items-center">
-        <div className="p-4 bg-gray-200 dark:bg-gray-700 rounded-lg">Pass Sequence</div>
+        <div className="glass-card p-4 rounded-xl min-w-[120px] text-center transition-all hover:scale-105">
+          <span className="text-white font-medium">Passes</span>
+        </div>
       </div>
-      <div>&rarr;</div>
+      
+      <div className="text-white/60 self-center">→</div>
+      
       <div className="flex flex-col items-center">
-        <div className="p-4 bg-green-200 dark:bg-green-700 rounded-lg">Optimized Binary</div>
+        <div className="glass-card p-4 rounded-xl min-w-[120px] text-center bg-green-500/20 transition-all hover:scale-105">
+          <span className="text-white font-bold">Optimized</span>
+        </div>
       </div>
     </div>
   );

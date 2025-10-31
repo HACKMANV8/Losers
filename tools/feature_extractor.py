@@ -422,7 +422,7 @@ def extract_features_from_c_source(c_file: str, output_bc: str = None,
     Returns:
         Dictionary of extracted features
     """
-    clang_path = "C:\\Program Files\\LLVM\\bin\\clang.exe"
+    clang_path = "clang"
     c_path = Path(c_file)
     
     if not c_path.exists():

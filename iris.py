@@ -191,14 +191,16 @@ class PassFormer(nn.Module):
 
 
 
-def beam_search_decode(model, features, feature_scaler, pass_vocab, device, beam_width=5, max_len=50):
+def beam_search_decode(model, raw_features_dict, feature_keys, feature_scaler, pass_vocab, device, beam_width=5, max_len=50):
     """Generates a pass sequence using beam search."""
     model.eval()
 
+    # Convert raw_features_dict to a numpy array in the correct order
+    feature_vector = np.array([raw_features_dict.get(k, 0.0) for k in feature_keys], dtype=np.float32)
 
-    features = feature_scaler.transform(features.reshape(1, -1))
-    features = torch.tensor(features, dtype=torch.float32).to(device)
-
+    # Scale the features
+    features_scaled = feature_scaler.transform(feature_vector.reshape(1, -1))
+    features = torch.tensor(features_scaled, dtype=torch.float32).to(device)
 
     start_token = pass_vocab['<sos>']
     end_token = pass_vocab['<eos>']

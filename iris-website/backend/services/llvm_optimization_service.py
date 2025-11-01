@@ -34,16 +34,18 @@ logger = get_logger(__name__)
 class LLVMOptimizationService:
     """Core service for LLVM optimization operations with RISC-V target."""
     
-    def __init__(self, target_arch: str = "riscv64", use_qemu: bool = True):
+    def __init__(self, target_arch: str = "riscv64", use_qemu: bool = True, target_metric: str = "execution_time"):
         """
         Initialize LLVM optimization service for RISC-V.
         
         Args:
             target_arch: Target architecture (riscv64, riscv32)
             use_qemu: Use QEMU emulation for cross-compiled binaries
+            target_metric: The target metric for the ML model (execution_time or binary_size)
         """
         self.target_arch = target_arch
         self.use_qemu = use_qemu
+        self.target_metric = target_metric
         
         # Set RISC-V specific configurations
         if target_arch == "riscv64":
@@ -125,17 +127,15 @@ class LLVMOptimizationService:
         try:
             project_root = Path(__file__).parent.parent.parent.parent
             preprocessing_dir = project_root / 'preprocessing_output'
+            models_dir = project_root / 'models_seqgen'
 
-            candidate_paths = [
-                project_root / 'models_seqgen' / 'passgen_transformer_best.pth',
-                project_root / 'models_seqgen' / 'passgen_transformer_final.pth',
-                project_root / 'models_seqgen' / 'passgen_transformer_model_best.pth',
-                project_root / 'models_seqgen' / 'passgen_transformer_model_final.pth'
-            ]
-
-            model_path = next((p for p in candidate_paths if p.exists()), None)
-            if model_path is None:
-                logger.warning("Transformer model not found. Pass prediction will not be available.")
+            # Construct model path based on target_metric
+            model_filename = f"passgen_transformer_{self.target_metric}.pth"
+            model_path = models_dir / model_filename
+            
+            if not model_path.exists():
+                logger.warning(f"Transformer model for {self.target_metric} not found at {model_path}. Pass prediction will not be available.")
+                self.transformer_model = None
                 return
             
             # Load vocabularies and scalers
@@ -147,13 +147,24 @@ class LLVMOptimizationService:
                 self.feature_keys = json.load(f)
             
             self.feature_scaler = joblib.load(preprocessing_dir / 'feature_scaler.pkl')
-            self.target_metric_scaler = joblib.load(preprocessing_dir / 'target_metric_scaler.pkl')
+            
+            # Load target metric scaler specific to the target_metric
+            target_metric_scaler_filename = f"target_metric_scaler_{self.target_metric}.pkl"
+            target_metric_scaler_path = preprocessing_dir / target_metric_scaler_filename
+            if not target_metric_scaler_path.exists():
+                logger.warning(f"Target metric scaler for {self.target_metric} not found at {target_metric_scaler_path}. Regression metrics will be unscaled.")
+                self.target_metric_scaler = None
+            else:
+                self.target_metric_scaler = joblib.load(target_metric_scaler_path)
             
             # Load model checkpoint
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
             checkpoint = torch.load(model_path, map_location=device, weights_only=False)
             model_config = checkpoint['config']
             
+            # Store the target metric from the loaded model's config
+            self.model_target_metric = model_config.get('target_metric', self.target_metric)
+
             # Initialize model
             self.transformer_model = PassGenTransformer(
                 vocab_size=model_config['vocab_size'],
@@ -183,7 +194,7 @@ class LLVMOptimizationService:
             self.transformer_model.to(device)
             self.transformer_model.eval()
             
-            logger.info("Transformer model loaded successfully for pass prediction")
+            logger.info(f"Transformer model for {self.model_target_metric} loaded successfully from {model_path}")
             
         except Exception as e:
             logger.warning(f"Failed to load transformer model: {e}")

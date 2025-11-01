@@ -38,6 +38,7 @@ const Spinner = () => (
 export default function Demo() {
   const [file, setFile] = useState<File | null>(null);
   const [beamSize, setBeamSize] = useState<number>(5); // New state for beam size
+  const [targetMetric, setTargetMetric] = useState<string>('execution_time'); // New state for target metric
   // Model selection is removed from the UI. Always use transformer on frontend.
   const model = 'transformer';
   const [loading, setLoading] = useState(false);
@@ -135,7 +136,8 @@ export default function Demo() {
           use_transformer: true,
           opt_level_hint: 'O_2', // Can be customized based on UI selection
           target_arch: 'riscv64',
-          beam_size: beamSize // Pass beamSize to the backend
+          beam_size: beamSize, // Pass beamSize to the backend
+          target_metric: targetMetric // Pass targetMetric to the backend
         }),
       });
 
@@ -230,6 +232,19 @@ export default function Demo() {
                     onChange={(e) => setBeamSize(parseInt(e.target.value))}
                     className="w-full p-3 rounded-xl bg-white/10 text-white border border-white/20 focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all"
                   />
+                </div>
+
+                <div className="mt-6">
+                  <label htmlFor="target-metric" className="block text-white text-lg font-medium mb-2">Optimize For:</label>
+                  <select
+                    id="target-metric"
+                    value={targetMetric}
+                    onChange={(e) => setTargetMetric(e.target.value)}
+                    className="w-full p-3 rounded-xl bg-white/10 text-white border border-white/20 focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all"
+                  >
+                    <option value="execution_time">Execution Time</option>
+                    <option value="binary_size">Binary Size</option>
+                  </select>
                 </div>
 
                 <button 

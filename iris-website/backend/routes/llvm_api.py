@@ -16,14 +16,23 @@ logger = get_logger(__name__)
 llvm_api = Blueprint('llvm_api', __name__, url_prefix='/api/llvm')
 
 # Initialize service (singleton pattern)
-_service = None
+_service_runtime = None
+_service_binary_size = None
 
-def get_service(target_arch: str = "riscv64") -> LLVMOptimizationService:
-    """Get or create the LLVM optimization service."""
-    global _service
-    if _service is None or _service.target_arch != target_arch:
-        _service = LLVMOptimizationService(target_arch=target_arch)
-    return _service
+def get_service(target_arch: str = "riscv64", target_metric: str = "execution_time") -> LLVMOptimizationService:
+    """Get or create the LLVM optimization service based on target metric and architecture."""
+    global _service_runtime, _service_binary_size
+    
+    if target_metric == "execution_time":
+        if _service_runtime is None or _service_runtime.target_arch != target_arch:
+            _service_runtime = LLVMOptimizationService(target_arch=target_arch, target_metric="execution_time")
+        return _service_runtime
+    elif target_metric == "binary_size":
+        if _service_binary_size is None or _service_binary_size.target_arch != target_arch:
+            _service_binary_size = LLVMOptimizationService(target_arch=target_arch, target_metric="binary_size")
+        return _service_binary_size
+    else:
+        raise ValueError(f"Unsupported target metric: {target_metric}")
 
 
 @llvm_api.route('/features', methods=['POST'])
@@ -122,6 +131,8 @@ def run_optimization():
         target_arch = data.get('target_arch', 'riscv64')
         use_transformer = data.get('use_transformer', True)
         opt_level_hint = data.get('opt_level_hint', 'O_0')
+        beam_size = data.get('beam_size', 5) # Retrieve beam_size
+        target_metric = data.get('target_metric', 'execution_time') # Retrieve target_metric
         
         # Validate passes if provided
         if ir_passes is not None and not isinstance(ir_passes, list):
@@ -130,7 +141,7 @@ def run_optimization():
                 'error': 'IR passes must be a list when provided'
             }), 400
         
-        service = get_service(target_arch)
+        service = get_service(target_arch, target_metric) # Pass target_metric to get_service
         
         # Determine passes source for response
         passes_source = 'manual' if ir_passes is not None else 'transformer'
@@ -140,7 +151,8 @@ def run_optimization():
             ir_passes, 
             machine_config,
             use_transformer=use_transformer,
-            opt_level_hint=opt_level_hint
+            opt_level_hint=opt_level_hint,
+            beam_size=beam_size # Pass beam_size to run_ml_passes
         )
         
         if success:
@@ -268,8 +280,10 @@ def compare_optimizations():
         target_arch = data.get('target_arch', 'riscv64')
         use_transformer = data.get('use_transformer', True)
         opt_level_hint = data.get('opt_level_hint', 'O_0')
+        beam_size = data.get('beam_size', 5) # Retrieve beam_size
+        target_metric = data.get('target_metric', 'execution_time') # Retrieve target_metric
         
-        service = get_service(target_arch)
+        service = get_service(target_arch, target_metric) # Pass target_metric to get_service
         
         # Pass transformer parameters to compare_with_standard
         results = service.compare_with_standard(
@@ -277,7 +291,8 @@ def compare_optimizations():
             ir_passes, 
             machine_config,
             use_transformer=use_transformer,
-            opt_level_hint=opt_level_hint
+            opt_level_hint=opt_level_hint,
+            beam_size=beam_size # Pass beam_size to compare_with_standard
         )
         
         return jsonify({

@@ -15,7 +15,9 @@ import joblib
 
 # --- Configuration ---
 MAX_PASS_SEQ_LEN = 60
-TARGET_METRICS = ['execution_time', 'binary_size']
+TARGET_METRICS = ['execution_time']
+TARGET_METRICS_ALL = ['execution_time', 'binary_size']
+
 D_MODEL = 128
 NHEAD = 4
 NUM_DECODER_LAYERS = 4
@@ -129,6 +131,12 @@ class PassGenDataset(Dataset):
         self.feature_scaler = feature_scaler
         self.target_metric_scaler = target_metric_scaler
         self.pad_id = pad_id
+        
+        # Pre-calculate index of the target metric in the labels array
+        try:
+            self.target_metric_idx = TARGET_METRICS_ALL.index(TARGET_METRICS[0])
+        except ValueError:
+            raise ValueError(f"Target metric {TARGET_METRICS[0]} not found in {TARGET_METRICS_ALL}")
 
     def __len__(self):
         return len(self.samples)
@@ -153,7 +161,10 @@ class PassGenDataset(Dataset):
             features = self.feature_scaler.transform(features.reshape(1, -1))[0]
         program_features = torch.tensor(features, dtype=torch.float32)
 
+        # Extract only the relevant target metric label
         labels = self._to_numpy(sample['labels'])
+        labels = labels[self.target_metric_idx:self.target_metric_idx+1] # Keep as 1-element array
+
         if self.target_metric_scaler is not None and labels.size:
             labels = self.target_metric_scaler.transform(labels.reshape(1, -1))[0]
         labels_tensor = torch.tensor(labels, dtype=torch.float32)
@@ -213,8 +224,8 @@ class PassGenTransformer(nn.Module):
             input_dim = layer_dim
         self.feature_mlp = nn.Sequential(*mlp_layers)
         self.feature_projection = nn.Linear(input_dim, d_model)
-        self.context_projection = nn.Linear(input_dim, d_model * context_tokens)
-        self.context_pos_encoder = PositionalEncoding(d_model, dropout, context_tokens + 2)
+        self.context_projection = nn.Linear(input_dim, d_model * self.context_tokens)
+        self.context_pos_encoder = PositionalEncoding(d_model, dropout, self.context_tokens + 2)
         self.context_dropout = nn.Dropout(dropout)
 
         # Transformer Decoder
@@ -229,7 +240,7 @@ class PassGenTransformer(nn.Module):
             nn.Linear(d_model, d_model // 2),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(d_model // 2, len(TARGET_METRICS))
+            nn.Linear(d_model // 2, 1) # Output dimension is 1 for a single metric
         )
 
     def _build_context(self, program_features, hardware_ids):
@@ -598,14 +609,12 @@ def evaluate_epoch(model, dataloader, criterion, regression_criterion, regressio
     
     # Calculate MAE
     runtime_mae = np.mean(np.abs(all_predicted_metrics_unscaled[:, 0] - all_target_labels_unscaled[:, 0]))
-    binary_size_mae = np.mean(np.abs(all_predicted_metrics_unscaled[:, 1] - all_target_labels_unscaled[:, 1]))
     
     return {
         'loss': total_loss / len(dataloader),
         'ngram_overlap': ngram_overlap_scores,
         'seq_accuracy': seq_token_accuracy,
-        'runtime_mae': runtime_mae,
-        'binary_size_mae': binary_size_mae
+        'runtime_mae': runtime_mae
     }
 
 # --- Main Execution ---
@@ -651,6 +660,10 @@ def main():
     
     args = parser.parse_args()
 
+    # Hardcode TARGET_METRICS for this specific training run
+    global TARGET_METRICS
+    TARGET_METRICS = ['execution_time']
+
     output_path = Path(args.output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
@@ -661,8 +674,9 @@ def main():
     print("Loading and preprocessing data...")
     try:
         from data_preprocessing_hybrid import load_and_preprocess_data
+        # Pass TARGET_METRICS_ALL to load_and_preprocess_data to ensure all labels are loaded
         processed_samples, _, feature_keys, joint_pass_vocab, hardware_vocab, _ = \
-            load_and_preprocess_data(args.input_json, MAX_PASS_SEQ_LEN, TARGET_METRICS, scale=False)
+            load_and_preprocess_data(args.input_json, MAX_PASS_SEQ_LEN, ['execution_time', 'binary_size'], scale=False)
 
         # Save preprocessing artifacts
         preprocessing_output_path = Path("preprocessing_output")
@@ -697,7 +711,10 @@ def main():
     # Fit scalers using only the training subset
     train_indices = train_dataset.indices
     train_features = np.stack([processed_samples[i]['program_features'] for i in train_indices]) if train_indices else np.empty((0, len(feature_keys)), dtype=np.float32)
-    train_labels = np.stack([processed_samples[i]['labels'] for i in train_indices]) if train_indices else np.empty((0, len(TARGET_METRICS)), dtype=np.float32)
+    
+    # Extract only the selected target metric for scaling
+    target_metric_idx = TARGET_METRICS_ALL.index(TARGET_METRICS[0])
+    train_labels = np.stack([processed_samples[i]['labels'][target_metric_idx:target_metric_idx+1] for i in train_indices]) if train_indices else np.empty((0, 1), dtype=np.float32)
 
     feature_scaler = StandardScaler().fit(train_features) if train_features.size else StandardScaler()
     target_metric_scaler = StandardScaler().fit(train_labels) if train_labels.size else StandardScaler()
@@ -705,7 +722,7 @@ def main():
     full_dataset.set_scalers(feature_scaler, target_metric_scaler)
 
     joblib.dump(feature_scaler, preprocessing_output_path / "feature_scaler.pkl")
-    joblib.dump(target_metric_scaler, preprocessing_output_path / "target_metric_scaler.pkl")
+    joblib.dump(target_metric_scaler, preprocessing_output_path / f"target_metric_scaler_{TARGET_METRICS[0]}.pkl")
 
     train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
     val_dataloader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
@@ -774,7 +791,6 @@ def main():
         print(f"  1-gram overlap: {val_metrics['ngram_overlap']['1-gram_overlap']:.4f}")
         print(f"  2-gram overlap: {val_metrics['ngram_overlap']['2-gram_overlap']:.4f}")
         print(f"  Runtime MAE: {val_metrics['runtime_mae']:.4f}")
-        print(f"  Binary Size MAE: {val_metrics['binary_size_mae']:.4f}")
 
         # Save best model
         if val_metrics['loss'] < best_val_loss:
@@ -802,8 +818,9 @@ def main():
                     'dropout': DROPOUT,
                     'context_tokens': CONTEXT_TOKENS,
                     'next_token_mode': args.next_token_mode,
+                    'target_metric': TARGET_METRICS[0], # Add target metric to config
                 }
-            }, output_path / "passgen_transformer_best.pth")
+            }, output_path / f"passgen_transformer_{TARGET_METRICS[0]}.pth")
 
     print("\nTraining complete!")
     print(f"Best validation loss: {best_val_loss:.4f}")

@@ -12,6 +12,7 @@ const Spinner = () => (
 export default function Comparison() {
   const [file, setFile] = useState<File | null>(null);
   const [beamSize, setBeamSize] = useState<number>(5); // New state for beam size
+  const [targetMetric, setTargetMetric] = useState<string>('execution_time'); // New state for target metric
   const [loading, setLoading] = useState(false);
   const [results, setResults] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
@@ -59,7 +60,8 @@ export default function Comparison() {
           use_transformer: true,
           opt_level_hint: 'O_2',
           target_arch: 'riscv64',
-          beam_size: beamSize // Pass beamSize to the backend
+          beam_size: beamSize, // Pass beamSize to the backend
+          target_metric: targetMetric // Pass targetMetric to the backend
         }),
       });
 
@@ -174,6 +176,19 @@ export default function Comparison() {
                   onChange={(e) => setBeamSize(parseInt(e.target.value))}
                   className="w-full p-3 rounded-xl bg-white/10 text-white border border-white/20 focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all"
                 />
+              </div>
+
+              <div className="mb-6">
+                <label htmlFor="target-metric" className="block text-white text-lg font-medium mb-2">Optimize For:</label>
+                <select
+                  id="target-metric"
+                  value={targetMetric}
+                  onChange={(e) => setTargetMetric(e.target.value)}
+                  className="w-full p-3 rounded-xl bg-white/10 text-white border border-white/20 focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all"
+                >
+                  <option value="execution_time">Execution Time</option>
+                  <option value="binary_size">Binary Size</option>
+                </select>
               </div>
 
               {error && (

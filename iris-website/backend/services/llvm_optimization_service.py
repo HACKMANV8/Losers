@@ -14,6 +14,8 @@ import torch
 import torch.nn as nn
 import numpy as np
 import joblib
+from sklearn.preprocessing import StandardScaler
+from torch.serialization import add_safe_globals
 
 # Add tools directory to path for feature extraction
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / 'tools'))
@@ -125,10 +127,10 @@ class LLVMOptimizationService:
             preprocessing_dir = project_root / 'preprocessing_output'
 
             candidate_paths = [
-                project_root / 'models_seqgen' / 'passgen_transformer_model_best.pth',
-                project_root / 'models_seqgen' / 'passgen_transformer_model_final.pth',
                 project_root / 'models_seqgen' / 'passgen_transformer_best.pth',
-                project_root / 'models_seqgen' / 'passgen_transformer_final.pth'
+                project_root / 'models_seqgen' / 'passgen_transformer_final.pth',
+                project_root / 'models_seqgen' / 'passgen_transformer_model_best.pth',
+                project_root / 'models_seqgen' / 'passgen_transformer_model_final.pth'
             ]
 
             model_path = next((p for p in candidate_paths if p.exists()), None)
@@ -149,7 +151,7 @@ class LLVMOptimizationService:
             
             # Load model checkpoint
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            checkpoint = torch.load(model_path, map_location=device)
+            checkpoint = torch.load(model_path, map_location=device, weights_only=False)
             model_config = checkpoint['config']
             
             # Initialize model
@@ -237,6 +239,8 @@ class LLVMOptimizationService:
                     value = 0.0
                 feature_vector.append(float(value))
             
+            logger.debug("Feature vector summary: sum=%.3f first5=%s", float(np.sum(feature_vector)), feature_vector[:5])
+
             # Scale features
             feature_array = np.array(feature_vector, dtype=np.float32).reshape(1, -1)
             scaled_features = self.feature_scaler.transform(feature_array)[0]
@@ -288,6 +292,7 @@ class LLVMOptimizationService:
             ]
             
             generated_ids = generated_sequence.squeeze(0).cpu().tolist()
+            logger.debug("Predicted token ids: %s", generated_ids[:15])
             
             # Filter out special tokens and hardware-specific suffixes
             pass_list = []
@@ -316,7 +321,7 @@ class LLVMOptimizationService:
                 pass_list = ['mem2reg', 'simplifycfg', 'instcombine', 'reassociate']
             
             logger.info(f"Generated {len(pass_list)} passes using transformer model")
-            logger.debug(f"Predicted passes: {pass_list[:10]}...")  # Log first 10 passes
+            logger.debug(f"Predicted passes: {pass_list}")
             
             return True, pass_list, None
             

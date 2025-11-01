@@ -292,13 +292,21 @@ class LLVMOptimizationService:
             # Filter out special tokens and hardware-specific suffixes
             pass_list = []
             for token_id in generated_ids:
-                if token_id not in special_tokens:
-                    pass_name = id_to_pass.get(token_id, '<unk>')
-                    if pass_name != '<unk>':
-                        # Remove hardware-specific suffix if present
-                        if '::' in pass_name:
-                            continue  # Skip machine-specific tokens
-                        pass_list.append(pass_name)
+                if token_id in special_tokens:
+                    continue
+
+                pass_name = id_to_pass.get(token_id, '<unk>')
+                if pass_name == '<unk>':
+                    continue
+
+                if '::' in pass_name:
+                    _, pass_suffix = pass_name.split('::', 1)
+                    if pass_suffix:
+                        pass_name = pass_suffix
+                    else:
+                        continue
+
+                pass_list.append(pass_name)
             
             # Deduplicate while preserving order (some passes may appear multiple times)
             # But we want to keep the sequence intact for LLVM

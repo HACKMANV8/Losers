@@ -24,13 +24,13 @@ export default function Home() {
 
         <nav className="flex flex-wrap justify-center gap-4 animate-scale-in">
           <Link href="/demo" className="px-8 py-4 text-lg font-bold text-white bg-gradient-to-r from-indigo-500 to-purple-600 rounded-2xl hover:from-indigo-600 hover:to-purple-700 shadow-xl hover:scale-105 transition-all duration-300">
-            🚀 Try Demo
+            Try Demo
           </Link>
           <Link href="/analytics" className="px-8 py-4 text-lg font-bold text-white bg-gradient-to-r from-purple-500 to-pink-600 rounded-2xl hover:from-purple-600 hover:to-pink-700 shadow-xl hover:scale-105 transition-all duration-300">
-            📊 Analytics
+            Analytics
           </Link>
           <Link href="/comparison" className="px-8 py-4 text-lg font-bold text-white bg-gradient-to-r from-pink-500 to-rose-600 rounded-2xl hover:from-pink-600 hover:to-rose-700 shadow-xl hover:scale-105 transition-all duration-300">
-            ⚡ Compare
+            Compare
           </Link>
         </nav>
 

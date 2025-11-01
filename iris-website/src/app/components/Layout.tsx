@@ -71,14 +71,8 @@ const Layout = ({ children }: { children: React.ReactNode }) => {
                 <Link href="/demo" className="text-white/90 hover:text-white hover:bg-white/20 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-200">
                   Demo
                 </Link>
-                <Link href="/analytics" className="text-white/90 hover:text-white hover:bg-white/20 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-200">
-                  Analytics
-                </Link>
                 <Link href="/comparison" className="text-white/90 hover:text-white hover:bg-white/20 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-200">
                   Comparison
-                </Link>
-                <Link href="/team" className="text-white/90 hover:text-white hover:bg-white/20 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-200">
-                  Team
                 </Link>
               </div>
             </div>
@@ -106,14 +100,8 @@ const Layout = ({ children }: { children: React.ReactNode }) => {
                 <Link href="/demo" className="text-white/90 hover:text-white hover:bg-white/20 px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200">
                   Demo
                 </Link>
-                <Link href="/analytics" className="text-white/90 hover:text-white hover:bg-white/20 px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200">
-                  Analytics
-                </Link>
                 <Link href="/comparison" className="text-white/90 hover:text-white hover:bg-white/20 px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200">
                   Comparison
-                </Link>
-                <Link href="/team" className="text-white/90 hover:text-white hover:bg-white/20 px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200">
-                  Team
                 </Link>
               </div>
             </div>

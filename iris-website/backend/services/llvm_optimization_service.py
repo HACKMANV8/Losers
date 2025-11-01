@@ -10,10 +10,19 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
 import sys
 import json
+import torch
+import torch.nn as nn
+import numpy as np
+import joblib
 
 # Add tools directory to path for feature extraction
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / 'tools'))
 from feature_extractor import LLVMFeatureExtractor
+
+# Add project root for model imports
+project_root = Path(__file__).parent.parent.parent.parent
+sys.path.insert(0, str(project_root))
+from train_passformer_seqgen import PassGenTransformer, build_allowed_token_mask, MAX_PASS_SEQ_LEN
 
 from utils.logger import get_logger
 
@@ -51,6 +60,15 @@ class LLVMOptimizationService:
             raise ValueError(f"Unsupported target architecture: {target_arch}")
         
         self.feature_extractor = LLVMFeatureExtractor()
+        
+        # Initialize transformer model for pass generation
+        self.transformer_model = None
+        self.joint_pass_vocab = None
+        self.hardware_vocab = None
+        self.feature_scaler = None
+        self.target_metric_scaler = None
+        self.feature_keys = None
+        self._load_transformer_model()
         
         logger.info(f"LLVMOptimizationService initialized for {target_arch}")
         logger.debug(f"Target triple: {self.target_triple}")
@@ -100,24 +118,243 @@ class LLVMOptimizationService:
             logger.error(f"Feature extraction failed: {e}")
             return False, None, str(e)
     
+    def _load_transformer_model(self):
+        """Load the trained transformer model and preprocessing artifacts."""
+        try:
+            project_root = Path(__file__).parent.parent.parent.parent
+            model_path = project_root / 'models_seqgen' / 'passgen_transformer_model_best.pth'
+            preprocessing_dir = project_root / 'preprocessing_output'
+            
+            # Check for alternative model path if best doesn't exist
+            if not model_path.exists():
+                alt_path = project_root / 'models_seqgen' / 'passgen_transformer_model_final.pth'
+                if alt_path.exists():
+                    model_path = alt_path
+                else:
+                    logger.warning("Transformer model not found. Pass prediction will not be available.")
+                    return
+            
+            # Load vocabularies and scalers
+            with open(preprocessing_dir / 'joint_pass_vocab.json', 'r') as f:
+                self.joint_pass_vocab = json.load(f)
+            with open(preprocessing_dir / 'hardware_vocab.json', 'r') as f:
+                self.hardware_vocab = json.load(f)
+            with open(preprocessing_dir / 'feature_keys.json', 'r') as f:
+                self.feature_keys = json.load(f)
+            
+            self.feature_scaler = joblib.load(preprocessing_dir / 'feature_scaler.pkl')
+            self.target_metric_scaler = joblib.load(preprocessing_dir / 'target_metric_scaler.pkl')
+            
+            # Load model checkpoint
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            checkpoint = torch.load(model_path, map_location=device)
+            model_config = checkpoint['config']
+            
+            # Initialize model
+            self.transformer_model = PassGenTransformer(
+                vocab_size=model_config['vocab_size'],
+                num_features=model_config['num_features'],
+                hardware_vocab_size=model_config['hardware_vocab_size'],
+                d_model=model_config['d_model'],
+                nhead=model_config['nhead'],
+                num_decoder_layers=model_config['num_decoder_layers'],
+                dim_feedforward=model_config['dim_feedforward'],
+                feature_mlp_layers=model_config['feature_mlp_layers'],
+                max_seq_len=model_config['max_seq_len'],
+                dropout=model_config.get('dropout', 0.1),
+                context_tokens=model_config.get('context_tokens', 7)
+            )
+            
+            # Load weights
+            self.transformer_model.load_state_dict(checkpoint['model_state_dict'])
+            self.transformer_model.to(device)
+            self.transformer_model.eval()
+            
+            logger.info("Transformer model loaded successfully for pass prediction")
+            
+        except Exception as e:
+            logger.warning(f"Failed to load transformer model: {e}")
+            self.transformer_model = None
+    
+    def _get_hardware_config_string(self, opt_level: str = "O_0") -> str:
+        """Convert current hardware configuration to vocab string format."""
+        # Map our target arch to hardware config string
+        # Based on the hardware_vocab.json, we use simplified hardware configs
+        base_config = opt_level
+        
+        # Add architecture features
+        if self.target_arch == "riscv64":
+            # Use a common RISC-V config from vocabulary
+            # Default to basic config with common extensions
+            return f"{base_config}_a_c_d_f"  # Atomic, Compressed, Double, Float
+        else:
+            # For riscv32, similar config
+            return f"{base_config}_a_c_d_f"
+    
+    def predict_passes_with_transformer(
+        self,
+        features: Dict[str, Any],
+        opt_level: str = "O_0",
+        beam_size: int = 5,
+        max_length: int = 60
+    ) -> Tuple[bool, Optional[List[str]], Optional[str]]:
+        """
+        Predict optimization passes using the transformer model.
+        
+        Args:
+            features: Extracted program features
+            opt_level: Optimization level hint (O_0, O_1, O_2, O_3)
+            beam_size: Beam size for beam search
+            max_length: Maximum sequence length
+        
+        Returns:
+            Tuple of (success, pass_list, error_message)
+        """
+        if self.transformer_model is None:
+            return False, None, "Transformer model not loaded"
+        
+        try:
+            device = next(self.transformer_model.parameters()).device
+            
+            # Get hardware configuration string
+            hw_config_str = self._get_hardware_config_string(opt_level)
+            
+            # Get hardware ID from vocabulary
+            hardware_id = self.hardware_vocab.get(hw_config_str, self.hardware_vocab.get("<unk>", 0))
+            
+            # Prepare features - ensure they match training feature order
+            feature_vector = []
+            for key in self.feature_keys:
+                if key in features:
+                    feature_vector.append(float(features[key]))
+                else:
+                    feature_vector.append(0.0)  # Default value for missing features
+            
+            # Scale features
+            feature_array = np.array(feature_vector, dtype=np.float32).reshape(1, -1)
+            scaled_features = self.feature_scaler.transform(feature_array)[0]
+            
+            # Convert to tensors
+            program_features = torch.tensor(scaled_features, dtype=torch.float32, device=device).unsqueeze(0)
+            hardware_ids = torch.tensor([hardware_id], dtype=torch.long, device=device)
+            
+            # Generate allowed token mask for hardware-aware generation
+            allowed_mask = build_allowed_token_mask(
+                hardware_ids, 
+                self.joint_pass_vocab, 
+                self.hardware_vocab, 
+                device
+            )
+            
+            # Generate sequence using beam search
+            with torch.no_grad():
+                if beam_size > 1:
+                    generated_sequence = self.transformer_model.generate_sequence_beam(
+                        program_features,
+                        hardware_ids,
+                        self.joint_pass_vocab["<sos>"],
+                        self.joint_pass_vocab["<eos>"],
+                        self.joint_pass_vocab["<pad>"],
+                        device,
+                        max_length,
+                        beam_size=beam_size,
+                        allowed_token_mask=allowed_mask
+                    )
+                else:
+                    generated_sequence = self.transformer_model.generate_sequence_greedy(
+                        program_features,
+                        hardware_ids,
+                        self.joint_pass_vocab["<sos>"],
+                        self.joint_pass_vocab["<eos>"],
+                        self.joint_pass_vocab["<pad>"],
+                        device,
+                        max_length,
+                        allowed_token_mask=allowed_mask
+                    )
+            
+            # Convert token IDs to pass names
+            id_to_pass = {v: k for k, v in self.joint_pass_vocab.items()}
+            special_tokens = [
+                self.joint_pass_vocab["<pad>"],
+                self.joint_pass_vocab["<sos>"],
+                self.joint_pass_vocab["<eos>"]
+            ]
+            
+            generated_ids = generated_sequence.squeeze(0).cpu().tolist()
+            
+            # Filter out special tokens and hardware-specific suffixes
+            pass_list = []
+            for token_id in generated_ids:
+                if token_id not in special_tokens:
+                    pass_name = id_to_pass.get(token_id, '<unk>')
+                    if pass_name != '<unk>':
+                        # Remove hardware-specific suffix if present
+                        if '::' in pass_name:
+                            continue  # Skip machine-specific tokens
+                        pass_list.append(pass_name)
+            
+            # Deduplicate while preserving order (some passes may appear multiple times)
+            # But we want to keep the sequence intact for LLVM
+            
+            if not pass_list:
+                # Fallback to some default passes if generation failed
+                pass_list = ['mem2reg', 'simplifycfg', 'instcombine', 'reassociate']
+            
+            logger.info(f"Generated {len(pass_list)} passes using transformer model")
+            logger.debug(f"Predicted passes: {pass_list[:10]}...")  # Log first 10 passes
+            
+            return True, pass_list, None
+            
+        except Exception as e:
+            logger.error(f"Error predicting passes with transformer: {e}")
+            return False, None, str(e)
+    
     def run_ml_passes(
         self,
         c_code: str,
-        ir_passes: List[str],
-        machine_config: Optional[Dict] = None
+        ir_passes: Optional[List[str]] = None,
+        machine_config: Optional[Dict] = None,
+        use_transformer: bool = True,
+        opt_level_hint: str = "O_0"
     ) -> Tuple[bool, Optional[Dict], Optional[str]]:
         """
         Apply ML-generated optimization passes and measure metrics.
         
         Args:
             c_code: C source code
-            ir_passes: List of LLVM IR passes to apply
+            ir_passes: List of LLVM IR passes to apply (if None, will predict using transformer)
             machine_config: Optional machine-level optimization config
+            use_transformer: Whether to use transformer for pass prediction if ir_passes is None
+            opt_level_hint: Optimization level hint for transformer (O_0, O_1, O_2, O_3)
         
         Returns:
             Tuple of (success, metrics_dict, error_message)
         """
         temp_files = []
+        
+        # If no passes provided and transformer is available, predict them
+        if ir_passes is None and use_transformer and self.transformer_model is not None:
+            # Extract features first
+            success, features, error = self.extract_features_from_c(c_code)
+            if not success:
+                return False, None, f"Feature extraction failed: {error}"
+            
+            # Predict passes
+            success, predicted_passes, error = self.predict_passes_with_transformer(
+                features, 
+                opt_level_hint,
+                beam_size=5
+            )
+            if success:
+                ir_passes = predicted_passes
+                logger.info(f"Using {len(ir_passes)} transformer-predicted passes")
+            else:
+                logger.warning(f"Pass prediction failed: {error}. Using default passes.")
+                ir_passes = ['mem2reg', 'simplifycfg', 'instcombine', 'reassociate', 'gvn', 'dce']
+        elif ir_passes is None:
+            # Fallback to default passes if no transformer and no passes provided
+            ir_passes = ['mem2reg', 'simplifycfg', 'instcombine', 'reassociate', 'gvn', 'dce']
+            logger.info("Using default optimization passes")
         
         try:
             # Create temporary C file
@@ -355,16 +592,20 @@ class LLVMOptimizationService:
     def compare_with_standard(
         self,
         c_code: str,
-        ir_passes: List[str],
-        machine_config: Optional[Dict] = None
+        ir_passes: Optional[List[str]] = None,
+        machine_config: Optional[Dict] = None,
+        use_transformer: bool = True,
+        opt_level_hint: str = "O_0"
     ) -> Dict[str, Any]:
         """
         Run ML passes and compare with standard optimizations.
         
         Args:
             c_code: C source code
-            ir_passes: ML-generated IR passes
+            ir_passes: ML-generated IR passes (if None, will use transformer)
             machine_config: Optional machine-level config
+            use_transformer: Whether to use transformer for pass prediction
+            opt_level_hint: Optimization level hint for transformer
         
         Returns:
             Comparison results dictionary
@@ -382,7 +623,13 @@ class LLVMOptimizationService:
             results['features'] = features
         
         # Run ML optimization
-        success, ml_metrics, error = self.run_ml_passes(c_code, ir_passes, machine_config)
+        success, ml_metrics, error = self.run_ml_passes(
+            c_code, 
+            ir_passes, 
+            machine_config,
+            use_transformer=use_transformer,
+            opt_level_hint=opt_level_hint
+        )
         if success:
             results['ml_optimization'] = ml_metrics
         else:

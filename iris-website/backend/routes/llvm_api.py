@@ -87,9 +87,11 @@ def run_optimization():
     Request JSON:
     {
         "code": "C source code string",
-        "ir_passes": ["pass1", "pass2", ...],
+        "ir_passes": ["pass1", "pass2", ...] (optional, will use transformer if not provided),
         "machine_config": {...} (optional),
-        "target_arch": "riscv64" (optional)
+        "target_arch": "riscv64" (optional),
+        "use_transformer": true/false (optional, default true),
+        "opt_level_hint": "O_0"/"O_1"/"O_2"/"O_3" (optional, default "O_0")
     }
     
     Response JSON:
@@ -100,6 +102,8 @@ def run_optimization():
             "binary_size": int,
             ...
         },
+        "passes_used": ["pass1", "pass2", ...],
+        "passes_source": "transformer"/"manual",
         "error": "error message if failed"
     }
     """
@@ -112,32 +116,42 @@ def run_optimization():
                 'error': 'No code provided'
             }), 400
         
-        if 'ir_passes' not in data:
-            return jsonify({
-                'success': False,
-                'error': 'No IR passes provided'
-            }), 400
-        
         c_code = data['code']
-        ir_passes = data['ir_passes']
+        ir_passes = data.get('ir_passes', None)  # Now optional
         machine_config = data.get('machine_config', None)
         target_arch = data.get('target_arch', 'riscv64')
+        use_transformer = data.get('use_transformer', True)
+        opt_level_hint = data.get('opt_level_hint', 'O_0')
         
-        # Validate passes
-        if not isinstance(ir_passes, list):
+        # Validate passes if provided
+        if ir_passes is not None and not isinstance(ir_passes, list):
             return jsonify({
                 'success': False,
-                'error': 'IR passes must be a list'
+                'error': 'IR passes must be a list when provided'
             }), 400
         
         service = get_service(target_arch)
-        success, metrics, error = service.run_ml_passes(c_code, ir_passes, machine_config)
+        
+        # Determine passes source for response
+        passes_source = 'manual' if ir_passes is not None else 'transformer'
+        
+        success, metrics, error = service.run_ml_passes(
+            c_code, 
+            ir_passes, 
+            machine_config,
+            use_transformer=use_transformer,
+            opt_level_hint=opt_level_hint
+        )
         
         if success:
-            return jsonify({
+            response = {
                 'success': True,
-                'metrics': metrics
-            })
+                'metrics': metrics,
+                'passes_source': passes_source
+            }
+            if metrics and 'ir_passes' in metrics:
+                response['passes_used'] = metrics['ir_passes']
+            return jsonify(response)
         else:
             return jsonify({
                 'success': False,
@@ -211,9 +225,11 @@ def compare_optimizations():
     Request JSON:
     {
         "code": "C source code string",
-        "ir_passes": ["pass1", "pass2", ...],
+        "ir_passes": ["pass1", "pass2", ...] (optional, will use transformer if not provided),
         "machine_config": {...} (optional),
-        "target_arch": "riscv64" (optional)
+        "target_arch": "riscv64" (optional),
+        "use_transformer": true/false (optional, default true),
+        "opt_level_hint": "O_0"/"O_1"/"O_2"/"O_3" (optional, default "O_0")
     }
     
     Response JSON:
@@ -246,19 +262,23 @@ def compare_optimizations():
                 'error': 'No code provided'
             }), 400
         
-        if 'ir_passes' not in data:
-            return jsonify({
-                'success': False,
-                'error': 'No IR passes provided'
-            }), 400
-        
         c_code = data['code']
-        ir_passes = data['ir_passes']
+        ir_passes = data.get('ir_passes', None)  # Now optional
         machine_config = data.get('machine_config', None)
         target_arch = data.get('target_arch', 'riscv64')
+        use_transformer = data.get('use_transformer', True)
+        opt_level_hint = data.get('opt_level_hint', 'O_0')
         
         service = get_service(target_arch)
-        results = service.compare_with_standard(c_code, ir_passes, machine_config)
+        
+        # Pass transformer parameters to compare_with_standard
+        results = service.compare_with_standard(
+            c_code, 
+            ir_passes, 
+            machine_config,
+            use_transformer=use_transformer,
+            opt_level_hint=opt_level_hint
+        )
         
         return jsonify({
             'success': True,

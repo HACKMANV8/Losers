@@ -184,7 +184,7 @@ export default function Demo() {
                 {error && (
                   <div className="mt-6 p-5 bg-red-500/20 border border-red-500/50 rounded-2xl text-white">
                     <div className="flex items-start gap-3 mb-3">
-                      <span className="text-2xl">⚠️</span>
+                      <span className="text-2xl">Warning:</span>
                       <div className="flex-1">
                         <strong className="font-bold text-lg block mb-2">Error</strong>
                         {error.includes('Compilation failed') ? (
@@ -194,7 +194,7 @@ export default function Demo() {
                               {error.replace('Feature extraction failed: Compilation failed: Failed to compile C source: ', '').trim()}
                             </pre>
                             <p className="text-white/70 text-sm mt-3">
-                              💡 <strong>Tip:</strong> Please fix the compilation errors in your C code and try again. Make sure your code compiles with standard C compilers.
+                              <strong>Tip:</strong> Please fix the compilation errors in your C code and try again. Make sure your code compiles with standard C compilers.
                             </p>
                           </div>
                         ) : (
@@ -238,7 +238,7 @@ export default function Demo() {
             {error && (
               <aside className="p-8 glass-card rounded-2xl border-2 border-red-400/50 animate-fade-in">
                 <div className="text-center">
-                  <span className="text-4xl block mb-4">⚠️</span>
+                  <span className="text-2xl block mb-4">Warning</span>
                   <h2 className="text-2xl font-bold text-white mb-2">Error</h2>
                   <p className="text-white mb-6">{error}</p>
                   <button onClick={handleClear} className="px-8 py-3 font-bold text-white bg-white/20 rounded-xl hover:bg-white/30 transition-all">

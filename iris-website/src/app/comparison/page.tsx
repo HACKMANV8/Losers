@@ -160,7 +160,7 @@ export default function Comparison() {
               {error && (
                 <div className="mb-6 p-5 bg-red-500/20 border border-red-500/50 rounded-2xl text-white">
                   <div className="flex items-start gap-3">
-                    <span className="text-2xl">⚠️</span>
+                    <span className="text-2xl">Warning:</span>
                     <div className="flex-1">
                       <strong className="font-bold text-lg block mb-2">Error</strong>
                       {error.includes('Compilation failed') || error.includes('compilation errors') ? (
@@ -172,7 +172,7 @@ export default function Comparison() {
                                   .trim()}
                           </pre>
                           <p className="text-white/70 text-sm mt-3">
-                            💡 <strong>Tip:</strong> Please fix the compilation errors in your C code and try again. Make sure your code compiles with standard C compilers.
+                            <strong>Tip:</strong> Please fix the compilation errors in your C code and try again. Make sure your code compiles with standard C compilers.
                           </p>
                         </div>
                       ) : (
@@ -242,7 +242,7 @@ export default function Comparison() {
                 <div className="glass p-6 rounded-xl">
                   <h3 className="text-xl font-bold text-white mb-2">Best Performance</h3>
                   <p className="text-4xl font-bold text-purple-400">
-                    {results.comparison?.vs_best?.ml_beats_best ? '✓ ML Wins' : '✗ Standard Wins'}
+                    {results.comparison?.vs_best?.ml_beats_best ? 'ML Wins' : 'Standard Wins'}
                   </p>
                 </div>
               </div>
@@ -255,7 +255,7 @@ export default function Comparison() {
               {results.ml_optimization?.error ? (
                 <div className="bg-red-500/20 border border-red-500/50 rounded-xl p-6">
                   <div className="flex items-start gap-3 mb-3">
-                    <span className="text-2xl">⚠️</span>
+                    <span className="text-2xl">Warning:</span>
                     <div className="flex-1">
                       <strong className="font-bold text-white text-lg block mb-2">Compilation Failed</strong>
                       <p className="text-white/90 mb-3">The ML-optimized code failed to compile:</p>
@@ -331,7 +331,7 @@ export default function Comparison() {
                           <div className="pt-2 border-t border-white/10">
                             <p className="text-white/70 text-sm">ML Speedup</p>
                             <p className={`text-lg font-bold ${comparisonData.ml_faster ? 'text-green-400' : 'text-red-400'}`}>
-                              {speedup.toFixed(2)}x {comparisonData.ml_faster ? '✓' : '✗'}
+                              {speedup.toFixed(2)}x {comparisonData.ml_faster ? 'Faster' : 'Slower'}
                             </p>
                           </div>
                         )}

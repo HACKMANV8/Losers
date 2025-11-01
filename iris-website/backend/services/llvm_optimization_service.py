@@ -225,10 +225,15 @@ class LLVMOptimizationService:
             # Prepare features - ensure they match training feature order
             feature_vector = []
             for key in self.feature_keys:
-                if key in features:
-                    feature_vector.append(float(features[key]))
-                else:
-                    feature_vector.append(0.0)  # Default value for missing features
+                alt_key = key
+                if key.startswith('feature_'):
+                    alt_key = key[len('feature_'):]
+                value = features.get(key)
+                if value is None:
+                    value = features.get(alt_key)
+                if value is None:
+                    value = 0.0
+                feature_vector.append(float(value))
             
             # Scale features
             feature_array = np.array(feature_vector, dtype=np.float32).reshape(1, -1)

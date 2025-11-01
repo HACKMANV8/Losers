@@ -43,10 +43,10 @@ export default function Comparison() {
       // Read file content
       const code = await file.text();
 
-      // Use default passes for now (can be enhanced with ML model later)
-      const ir_passes = ['mem2reg', 'simplifycfg', 'instcombine'];
+      // Use transformer model to predict optimal passes
+      // Don't send ir_passes - let the backend's transformer model predict them
 
-      // Get comparison results directly
+      // Get comparison results with ML-predicted passes
       const compareRes = await fetch(API_ENDPOINTS.compare, {
         method: 'POST',
         headers: {
@@ -54,7 +54,9 @@ export default function Comparison() {
         },
         body: JSON.stringify({
           code,
-          ir_passes,
+          // Don't send ir_passes - let transformer predict them
+          use_transformer: true,
+          opt_level_hint: 'O_2',
           target_arch: 'riscv64'
         }),
       });
@@ -63,11 +65,13 @@ export default function Comparison() {
 
       if (compareRes.ok && compareData.success) {
         setResults(compareData);
+        // Get predicted passes from the ML optimization results
+        const predicted_passes = compareData.ml_optimization?.ir_passes || [];
         // Store ML optimization results for display
         setOptimizationResults({
           success: true,
           data: {
-            predicted_passes: ir_passes,
+            predicted_passes: predicted_passes,
             metrics: compareData.ml_optimization
           }
         });
@@ -219,7 +223,7 @@ export default function Comparison() {
             {/* Summary */}
             <section className="glass-card p-8 rounded-2xl mb-8 animate-slide-in">
               <h2 className="text-3xl font-bold text-white mb-6">Comparison Summary</h2>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
                 <div className="glass p-6 rounded-xl">
                   <h3 className="text-xl font-bold text-white mb-2">ML Beats Standard Levels</h3>
                   <p className="text-4xl font-bold text-green-400">
@@ -245,6 +249,31 @@ export default function Comparison() {
                     {results.comparison?.vs_best?.ml_beats_best ? 'ML Wins' : 'Standard Wins'}
                   </p>
                 </div>
+                <div className="glass p-6 rounded-xl">
+                  <h3 className="text-xl font-bold text-white mb-2">ML Smaller Than</h3>
+                  <p className="text-4xl font-bold text-blue-400">
+                    {(() => {
+                      const smallerCount = Object.entries(results.comparison || {}).filter(
+                        ([key, val]: [string, any]) => key.startsWith('-O') && val.ml_smaller
+                      ).length;
+                      return `${smallerCount} / 4`;
+                    })()}
+                  </p>
+                  <p className="text-white/60 mt-2">
+                    {(() => {
+                      const smaller = Object.entries(results.comparison || {}).filter(
+                        ([key, val]: [string, any]) => key.startsWith('-O') && val.ml_smaller
+                      ).map(([key]) => key);
+                      return smaller.length > 0 ? smaller.join(', ') : 'None';
+                    })()}
+                  </p>
+                </div>
+                <div className="glass p-6 rounded-xl">
+                  <h3 className="text-xl font-bold text-white mb-2">Best Size Optimization</h3>
+                  <p className="text-4xl font-bold text-yellow-400">
+                    {results.comparison?.vs_best_size?.ml_beats_best_size ? 'ML Wins' : 'Standard Wins'}
+                  </p>
+                </div>
               </div>
             </section>
 
@@ -266,7 +295,7 @@ export default function Comparison() {
                   </div>
                 </div>
               ) : (
-                <div className="grid grid-cols-2 md:grid-cols-3 gap-6">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                   <div className="glass p-6 rounded-xl">
                     <p className="text-white/70 text-sm">Execution Time</p>
                     <p className="text-2xl font-bold text-green-400 mt-2">
@@ -311,6 +340,7 @@ export default function Comparison() {
                   const data = results.standard_optimizations?.[level];
                   const comparisonData = results.comparison?.[level];
                   const speedup = comparisonData?.speedup || 0;
+                  const sizeReduction = comparisonData?.size_reduction || 0;
                   return (
                     <div key={level} className="glass p-6 rounded-xl">
                       <h3 className="text-xl font-bold text-white mb-4">{level}</h3>
@@ -328,12 +358,20 @@ export default function Comparison() {
                           </p>
                         </div>
                         {comparisonData && (
-                          <div className="pt-2 border-t border-white/10">
-                            <p className="text-white/70 text-sm">ML Speedup</p>
-                            <p className={`text-lg font-bold ${comparisonData.ml_faster ? 'text-green-400' : 'text-red-400'}`}>
-                              {speedup.toFixed(2)}x {comparisonData.ml_faster ? 'Faster' : 'Slower'}
-                            </p>
-                          </div>
+                          <>
+                            <div className="pt-2 border-t border-white/10">
+                              <p className="text-white/70 text-sm">ML Speedup</p>
+                              <p className={`text-lg font-bold ${comparisonData.ml_faster ? 'text-green-400' : 'text-red-400'}`}>
+                                {speedup.toFixed(2)}x {comparisonData.ml_faster ? 'Faster' : 'Slower'}
+                              </p>
+                            </div>
+                            <div>
+                              <p className="text-white/70 text-sm">ML Size Reduction</p>
+                              <p className={`text-lg font-bold ${sizeReduction > 0 ? 'text-blue-400' : 'text-red-400'}`}>
+                                {(sizeReduction * 100).toFixed(1)}% {sizeReduction > 0 ? 'Smaller' : 'Larger'}
+                              </p>
+                            </div>
+                          </>
                         )}
                       </div>
                     </div>

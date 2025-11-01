@@ -169,8 +169,17 @@ class LLVMOptimizationService:
                 context_tokens=model_config.get('context_tokens', 7)
             )
             
-            # Load weights
-            self.transformer_model.load_state_dict(checkpoint['model_state_dict'])
+            # Load weights (use strict=False to handle architecture mismatches)
+            missing_keys, unexpected_keys = self.transformer_model.load_state_dict(
+                checkpoint['model_state_dict'], 
+                strict=False
+            )
+            
+            if missing_keys:
+                logger.warning(f"Model loading - missing keys: {missing_keys[:5]}...")
+            if unexpected_keys:
+                logger.warning(f"Model loading - unexpected keys: {unexpected_keys[:5]}...")
+            
             self.transformer_model.to(device)
             self.transformer_model.eval()
             
@@ -297,21 +306,20 @@ class LLVMOptimizationService:
             # Filter out special tokens and hardware-specific suffixes
             pass_list = []
             for token_id in generated_ids:
-                if token_id in special_tokens:
-                    continue
-
-                pass_name = id_to_pass.get(token_id, '<unk>')
-                if pass_name == '<unk>':
-                    continue
-
-                if '::' in pass_name:
-                    _, pass_suffix = pass_name.split('::', 1)
-                    if pass_suffix:
-                        pass_name = pass_suffix
-                    else:
-                        continue
-
-                pass_list.append(pass_name)
+                if token_id not in special_tokens:
+                    pass_name = id_to_pass.get(token_id, '<unk>')
+                    if pass_name != '<unk>':
+                        # Skip hardware-specific tokens (contain ::)
+                        if '::' in pass_name:
+                            continue
+                        # Skip machine-level passes (start with 'machine')
+                        if pass_name.startswith('machine'):
+                            continue
+                        # Skip optimization level markers
+                        if pass_name.lower().startswith(('o_0', 'o_1', 'o_2', 'o_3')):
+                            continue
+                        # Only include valid LLVM IR passes
+                        pass_list.append(pass_name)
             
             # Deduplicate while preserving order (some passes may appear multiple times)
             # But we want to keep the sequence intact for LLVM
@@ -678,7 +686,7 @@ class LLVMOptimizationService:
             
             results['comparison'] = comparisons
             
-            # Find best standard optimization
+            # Find best standard optimization for performance
             best_std = None
             best_time = float('inf')
             for opt_level, metrics in results['standard_optimizations'].items():
@@ -686,11 +694,29 @@ class LLVMOptimizationService:
                     best_time = metrics['execution_time_avg']
                     best_std = opt_level
             
+            # Find best standard optimization for size
+            best_size_std = None
+            best_size = float('inf')
+            for opt_level, metrics in results['standard_optimizations'].items():
+                if metrics.get('success') and metrics['binary_size'] < best_size:
+                    best_size = metrics['binary_size']
+                    best_size_std = opt_level
+            
             if best_std:
                 results['comparison']['vs_best'] = {
                     'best_standard': best_std,
                     'ml_beats_best': ml_exec_time < best_time,
                     'speedup_vs_best': best_time / ml_exec_time if ml_exec_time > 0 else 0
+                }
+            
+            # Add size comparison with best size optimization
+            if best_size_std:
+                results['comparison']['vs_best_size'] = {
+                    'best_size_standard': best_size_std,
+                    'best_size_bytes': best_size,
+                    'ml_size_bytes': ml_binary_size,
+                    'ml_beats_best_size': ml_binary_size < best_size,
+                    'size_reduction_vs_best': 1 - (ml_binary_size / best_size) if best_size > 0 else 0
                 }
         
         return results

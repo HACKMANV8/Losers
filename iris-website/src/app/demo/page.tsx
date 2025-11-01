@@ -37,7 +37,8 @@ const Spinner = () => (
 
 export default function Demo() {
   const [file, setFile] = useState<File | null>(null);
-  const [model, setModel] = useState('transformer');
+  // Model selection is removed from the UI. Always use transformer on frontend.
+  const model = 'transformer';
   const [loading, setLoading] = useState(false);
   const [results, setResults] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
@@ -117,12 +118,11 @@ export default function Demo() {
         return;
       }
 
-      // Step 2: Feed features to model (placeholder - will be implemented with actual model)
-      // For now, we'll use a default pass sequence
-      // In the future, this will call an ML model endpoint with the features
-      const ir_passes = ['mem2reg', 'simplifycfg', 'instcombine', 'gvn', 'loop-simplify'];
+      // Step 2: Use transformer model to predict optimal passes
+      // By not sending ir_passes, the backend will use the transformer model
+      // to predict passes based on the extracted features
 
-      // Step 3: Apply optimization passes
+      // Step 3: Apply ML-predicted optimization passes
       const res = await fetch(API_ENDPOINTS.optimize, {
         method: 'POST',
         headers: {
@@ -130,7 +130,9 @@ export default function Demo() {
         },
         body: JSON.stringify({
           code,
-          ir_passes,
+          // Don't send ir_passes - let transformer predict them
+          use_transformer: true,
+          opt_level_hint: 'O_2', // Can be customized based on UI selection
           target_arch: 'riscv64'
         }),
       });
@@ -138,11 +140,14 @@ export default function Demo() {
       const data = await res.json();
 
       if (res.ok && data.success) {
+        // Get predicted passes from the response
+        const predicted_passes = data.passes_used || data.metrics?.ir_passes || [];
+        
         // Format results to match expected structure with features
         setResults({
           success: true,
           data: {
-            predicted_passes: ir_passes,
+            predicted_passes: predicted_passes,
             metrics: data.metrics,
             model: model,
             features: featuresData.features
@@ -212,20 +217,6 @@ export default function Demo() {
                   </p>
                 )}
 
-                <fieldset className="mt-8">
-                  <legend className="font-bold text-white text-xl mb-4">Select Model</legend>
-                  <div className="flex flex-col md:flex-row gap-4">
-                    <label className="flex items-center cursor-pointer glass-card px-6 py-4 rounded-xl hover:bg-white/20 transition-all flex-1">
-                      <input type="radio" name="model" value="transformer" checked={model === 'transformer'} onChange={() => setModel('transformer')} className="mr-4 h-5 w-5" />
-                      <span className="text-white font-bold text-lg">Transformer</span>
-                    </label>
-                    <label className="flex items-center cursor-pointer glass-card px-6 py-4 rounded-xl hover:bg-white/20 transition-all flex-1">
-                      <input type="radio" name="model" value="xgboost" checked={model === 'xgboost'} onChange={() => setModel('xgboost')} className="mr-4 h-5 w-5" />
-                      <span className="text-white font-bold text-lg">XGBoost</span>
-                    </label>
-                  </div>
-                </fieldset>
-
                 <button 
                   onClick={handleSubmit} 
                   disabled={!file || loading}
@@ -259,7 +250,7 @@ export default function Demo() {
 
                 <div className="glass-card p-6 rounded-2xl mb-6 animate-fade-in">
                   <h3 className="text-xl font-bold text-white mb-3">Model Used</h3>
-                  <p className="text-2xl font-bold text-white capitalize">{results.model_used}</p>
+                  <p className="text-2xl font-bold text-white capitalize">{results.model_used || results.data?.model || 'transformer'}</p>
                 </div>
 
                 <section className="glass-card p-6 rounded-2xl mb-6 animate-slide-in">

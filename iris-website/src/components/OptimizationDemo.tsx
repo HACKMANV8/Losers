@@ -304,53 +304,196 @@ export default function OptimizationDemo() {
               <div>
                 {/* ML Optimization Metrics */}
                 {results.data.ml_optimization && (
-                  <div className="mb-4">
-                    <h4 className="font-semibold mb-2">ML Optimization</h4>
-                    <div className="grid grid-cols-2 gap-2">
-                      <div>Execution Time: {results.data.ml_optimization.execution_time_avg?.toFixed(6)}s</div>
-                      <div>Binary Size: {results.data.ml_optimization.binary_size?.toLocaleString()} bytes</div>
+                  <div className="mb-4 p-4 bg-blue-50 rounded-lg">
+                    <h4 className="font-semibold mb-3 text-lg">ML Optimization Results</h4>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="bg-white p-3 rounded shadow-sm">
+                        <div className="text-sm text-gray-600">Execution Time</div>
+                        <div className="text-xl font-bold text-blue-600">
+                          {results.data.ml_optimization.execution_time_avg?.toFixed(6)}s
+                        </div>
+                      </div>
+                      <div className="bg-white p-3 rounded shadow-sm">
+                        <div className="text-sm text-gray-600">Binary Size</div>
+                        <div className="text-xl font-bold text-purple-600">
+                          {results.data.ml_optimization.binary_size?.toLocaleString()} bytes
+                        </div>
+                      </div>
                     </div>
                   </div>
                 )}
 
-                {/* Comparison with Standard */}
-                <div>
-                  <h4 className="font-semibold mb-2">Comparison with Standard Optimizations</h4>
-                  <table className="w-full border-collapse">
-                    <thead>
-                      <tr className="bg-gray-200">
-                        <th className="border p-2">Level</th>
-                        <th className="border p-2">Speedup</th>
-                        <th className="border p-2">Size Reduction</th>
-                        <th className="border p-2">ML Faster?</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {Object.entries(results.data.comparison)
-                        .filter(([key]) => key !== 'vs_best')
-                        .map(([level, comp]: [string, any]) => (
-                          <tr key={level}>
-                            <td className="border p-2">{level}</td>
-                            <td className="border p-2">{comp.speedup?.toFixed(2)}x</td>
-                            <td className="border p-2">{(comp.size_reduction * 100)?.toFixed(1)}%</td>
-                            <td className="border p-2">
-                              <span className={comp.ml_faster ? 'text-green-600' : 'text-red-600'}>
-                                {comp.ml_faster ? 'Yes' : 'No'}
-                              </span>
-                            </td>
-                          </tr>
-                        ))}
-                    </tbody>
-                  </table>
+                {/* Performance Comparison Table */}
+                <div className="mb-6">
+                  <h4 className="font-semibold mb-3 text-lg">Performance Comparison</h4>
+                  <div className="overflow-x-auto">
+                    <table className="w-full border-collapse">
+                      <thead>
+                        <tr className="bg-gray-200">
+                          <th className="border p-2">Opt Level</th>
+                          <th className="border p-2">Standard Time</th>
+                          <th className="border p-2">ML Speedup</th>
+                          <th className="border p-2">ML Faster?</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {Object.entries(results.data.comparison)
+                          .filter(([key]) => key !== 'vs_best')
+                          .map(([level, comp]: [string, any]) => {
+                            const stdOptimization = results.data.standard_optimizations?.[level];
+                            return (
+                              <tr key={level}>
+                                <td className="border p-2 font-semibold">{level}</td>
+                                <td className="border p-2">
+                                  {stdOptimization?.execution_time_avg?.toFixed(6)}s
+                                </td>
+                                <td className="border p-2">
+                                  <span className={comp.speedup >= 1 ? 'text-green-600 font-semibold' : 'text-red-600'}>
+                                    {comp.speedup?.toFixed(2)}x
+                                  </span>
+                                </td>
+                                <td className="border p-2">
+                                  <span className={comp.ml_faster ? 'text-green-600 font-semibold' : 'text-red-600'}>
+                                    {comp.ml_faster ? '✓ Yes' : '✗ No'}
+                                  </span>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
 
-                  {/* Best Standard Comparison */}
+                {/* Size Comparison Table */}
+                <div className="mb-6">
+                  <h4 className="font-semibold mb-3 text-lg">Binary Size Comparison</h4>
+                  <div className="overflow-x-auto">
+                    <table className="w-full border-collapse">
+                      <thead>
+                        <tr className="bg-purple-100">
+                          <th className="border p-2">Opt Level</th>
+                          <th className="border p-2">Standard Size</th>
+                          <th className="border p-2">ML Size</th>
+                          <th className="border p-2">Size Reduction</th>
+                          <th className="border p-2">ML Smaller?</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {Object.entries(results.data.comparison)
+                          .filter(([key]) => key !== 'vs_best')
+                          .map(([level, comp]: [string, any]) => {
+                            const stdOptimization = results.data.standard_optimizations?.[level];
+                            const mlSize = results.data.ml_optimization?.binary_size;
+                            const stdSize = stdOptimization?.binary_size;
+                            const sizeDiff = stdSize && mlSize ? stdSize - mlSize : 0;
+                            
+                            return (
+                              <tr key={level}>
+                                <td className="border p-2 font-semibold">{level}</td>
+                                <td className="border p-2">
+                                  {stdSize?.toLocaleString()} bytes
+                                </td>
+                                <td className="border p-2 font-semibold text-purple-600">
+                                  {mlSize?.toLocaleString()} bytes
+                                </td>
+                                <td className="border p-2">
+                                  <span className={comp.size_reduction > 0 ? 'text-green-600 font-semibold' : 'text-red-600'}>
+                                    {(comp.size_reduction * 100)?.toFixed(1)}%
+                                    {sizeDiff !== 0 && (
+                                      <span className="text-xs ml-1">
+                                        ({sizeDiff > 0 ? '-' : '+'}{Math.abs(sizeDiff).toLocaleString()} bytes)
+                                      </span>
+                                    )}
+                                  </span>
+                                </td>
+                                <td className="border p-2">
+                                  <span className={comp.ml_smaller ? 'text-green-600 font-semibold' : 'text-red-600'}>
+                                    {comp.ml_smaller ? '✓ Yes' : '✗ No'}
+                                  </span>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {/* Summary Cards */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {/* Performance Summary */}
                   {results.data.comparison.vs_best && (
-                    <div className="mt-4 p-3 bg-blue-50 rounded">
-                      <strong>Best Standard:</strong> {results.data.comparison.vs_best.best_standard} | 
-                      <strong> ML Beats Best:</strong> {results.data.comparison.vs_best.ml_beats_best ? 'Yes' : 'No'} | 
-                      <strong> Speedup vs Best:</strong> {results.data.comparison.vs_best.speedup_vs_best?.toFixed(2)}x
+                    <div className="p-4 bg-green-50 rounded-lg border border-green-200">
+                      <h5 className="font-semibold mb-2 text-green-800">Performance Summary</h5>
+                      <div className="space-y-1 text-sm">
+                        <div>
+                          <strong>Best Standard Level:</strong> {results.data.comparison.vs_best.best_standard}
+                        </div>
+                        <div>
+                          <strong>ML Beats Best:</strong>{' '}
+                          <span className={results.data.comparison.vs_best.ml_beats_best ? 'text-green-600' : 'text-red-600'}>
+                            {results.data.comparison.vs_best.ml_beats_best ? '✓ Yes' : '✗ No'}
+                          </span>
+                        </div>
+                        <div>
+                          <strong>Speedup vs Best:</strong>{' '}
+                          <span className="font-semibold">
+                            {results.data.comparison.vs_best.speedup_vs_best?.toFixed(2)}x
+                          </span>
+                        </div>
+                      </div>
                     </div>
                   )}
+
+                  {/* Size Summary */}
+                  {(() => {
+                    const comparisons = Object.entries(results.data.comparison)
+                      .filter(([key]) => key !== 'vs_best' && key !== 'vs_best_size');
+                    const smallerCount = comparisons.filter(([, comp]: [string, any]) => comp.ml_smaller).length;
+                    const totalCount = comparisons.length;
+                    const vsBestSize = results.data.comparison?.vs_best_size;
+                    
+                    return (
+                      <div className="p-4 bg-purple-50 rounded-lg border border-purple-200">
+                        <h5 className="font-semibold mb-2 text-purple-800">Size Summary</h5>
+                        <div className="space-y-1 text-sm">
+                          {vsBestSize && (
+                            <>
+                              <div>
+                                <strong>Best Standard Size Level:</strong> {vsBestSize.best_size_standard}
+                              </div>
+                              <div>
+                                <strong>Best Standard Size:</strong> {vsBestSize.best_size_bytes?.toLocaleString()} bytes
+                              </div>
+                              <div>
+                                <strong>ML Beats Best Size:</strong>{' '}
+                                <span className={vsBestSize.ml_beats_best_size ? 'text-green-600' : 'text-red-600'}>
+                                  {vsBestSize.ml_beats_best_size ? '✓ Yes' : '✗ No'}
+                                </span>
+                              </div>
+                              <div>
+                                <strong>Size Reduction vs Best:</strong>{' '}
+                                <span className="font-semibold">
+                                  {(vsBestSize.size_reduction_vs_best * 100).toFixed(1)}%
+                                </span>
+                              </div>
+                            </>
+                          )}
+                          <div>
+                            <strong>ML Smaller Than:</strong>{' '}
+                            <span className="font-semibold">
+                              {smallerCount}/{totalCount} standard levels
+                            </span>
+                          </div>
+                          <div>
+                            <strong>ML Binary Size:</strong>{' '}
+                            {results.data.ml_optimization?.binary_size?.toLocaleString()} bytes
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </div>
               </div>
             )}

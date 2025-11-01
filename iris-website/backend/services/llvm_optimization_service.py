@@ -624,7 +624,8 @@ class LLVMOptimizationService:
         ir_passes: Optional[List[str]] = None,
         machine_config: Optional[Dict] = None,
         use_transformer: bool = True,
-        opt_level_hint: str = "O_0"
+        opt_level_hint: str = "O_0",
+        beam_size: int = 5
     ) -> Dict[str, Any]:
         """
         Run ML passes and compare with standard optimizations.
@@ -657,7 +658,8 @@ class LLVMOptimizationService:
             ir_passes, 
             machine_config,
             use_transformer=use_transformer,
-            opt_level_hint=opt_level_hint
+            opt_level_hint=opt_level_hint,
+            beam_size=beam_size
         )
         if success:
             results['ml_optimization'] = ml_metrics

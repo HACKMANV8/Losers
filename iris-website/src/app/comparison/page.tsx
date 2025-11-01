@@ -11,6 +11,7 @@ const Spinner = () => (
 
 export default function Comparison() {
   const [file, setFile] = useState<File | null>(null);
+  const [beamSize, setBeamSize] = useState<number>(5); // New state for beam size
   const [loading, setLoading] = useState(false);
   const [results, setResults] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
@@ -57,7 +58,8 @@ export default function Comparison() {
           // Don't send ir_passes - let transformer predict them
           use_transformer: true,
           opt_level_hint: 'O_2',
-          target_arch: 'riscv64'
+          target_arch: 'riscv64',
+          beam_size: beamSize // Pass beamSize to the backend
         }),
       });
 
@@ -160,6 +162,19 @@ export default function Comparison() {
                   <span className="block mt-2 text-white/80">{(file.size / 1024).toFixed(2)} KB</span>
                 </p>
               )}
+
+              <div className="mb-6">
+                <label htmlFor="beam-size" className="block text-white text-lg font-medium mb-2">Beam Size:</label>
+                <input
+                  type="number"
+                  id="beam-size"
+                  min="1"
+                  max="20"
+                  value={beamSize}
+                  onChange={(e) => setBeamSize(parseInt(e.target.value))}
+                  className="w-full p-3 rounded-xl bg-white/10 text-white border border-white/20 focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all"
+                />
+              </div>
 
               {error && (
                 <div className="mb-6 p-5 bg-red-500/20 border border-red-500/50 rounded-2xl text-white">

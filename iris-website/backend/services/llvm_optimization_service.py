@@ -122,17 +122,19 @@ class LLVMOptimizationService:
         """Load the trained transformer model and preprocessing artifacts."""
         try:
             project_root = Path(__file__).parent.parent.parent.parent
-            model_path = project_root / 'models_seqgen' / 'passgen_transformer_model_best.pth'
             preprocessing_dir = project_root / 'preprocessing_output'
-            
-            # Check for alternative model path if best doesn't exist
-            if not model_path.exists():
-                alt_path = project_root / 'models_seqgen' / 'passgen_transformer_model_final.pth'
-                if alt_path.exists():
-                    model_path = alt_path
-                else:
-                    logger.warning("Transformer model not found. Pass prediction will not be available.")
-                    return
+
+            candidate_paths = [
+                project_root / 'models_seqgen' / 'passgen_transformer_model_best.pth',
+                project_root / 'models_seqgen' / 'passgen_transformer_model_final.pth',
+                project_root / 'models_seqgen' / 'passgen_transformer_best.pth',
+                project_root / 'models_seqgen' / 'passgen_transformer_final.pth'
+            ]
+
+            model_path = next((p for p in candidate_paths if p.exists()), None)
+            if model_path is None:
+                logger.warning("Transformer model not found. Pass prediction will not be available.")
+                return
             
             # Load vocabularies and scalers
             with open(preprocessing_dir / 'joint_pass_vocab.json', 'r') as f:

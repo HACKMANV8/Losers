@@ -124,7 +124,8 @@ def tokenize_and_pad(sequence_list, vocab, max_len):
     return torch.tensor(token_ids, dtype=torch.long)
 
 
-def load_and_preprocess_data(json_data_path, max_seq_len=MAX_PASS_SEQ_LEN, target_metrics=TARGET_METRICS):
+def load_and_preprocess_data(json_data_path, max_seq_len=MAX_PASS_SEQ_LEN, target_metrics=TARGET_METRICS,
+                             scale=True, feature_scaler=None, target_metric_scaler=None):
     """
     Loads raw JSON data, builds vocabularies, tokenizes, encodes, and normalizes features.
     Returns processed samples, scaler, feature keys, and vocabularies.
@@ -162,21 +163,32 @@ def load_and_preprocess_data(json_data_path, max_seq_len=MAX_PASS_SEQ_LEN, targe
         metrics_vector = [float(entry.get(metric, 0.0)) for metric in target_metrics]
         target_metrics_for_scaler.append(metrics_vector)
 
-    # Fit and transform program features
-    feature_scaler = StandardScaler()
-    if program_features_for_scaler:
-        scaled_features = feature_scaler.fit_transform(np.array(program_features_for_scaler, dtype=np.float32))
-    else:
-        scaled_features = np.array([], dtype=np.float32).reshape(0, len(feature_keys))
-    print("Program features scaler fitted.")
+    program_features_array = np.array(program_features_for_scaler, dtype=np.float32) if program_features_for_scaler else np.array([], dtype=np.float32).reshape(0, len(feature_keys))
+    target_metrics_array = np.array(target_metrics_for_scaler, dtype=np.float32) if target_metrics_for_scaler else np.array([], dtype=np.float32).reshape(0, len(target_metrics))
 
-    # Fit and transform target metrics
-    target_metric_scaler = StandardScaler()
-    if target_metrics_for_scaler:
-        scaled_target_metrics = target_metric_scaler.fit_transform(np.array(target_metrics_for_scaler, dtype=np.float32))
+    if scale:
+        if feature_scaler is None:
+            feature_scaler = StandardScaler()
+            if program_features_array.size:
+                scaled_features = feature_scaler.fit_transform(program_features_array)
+            else:
+                scaled_features = program_features_array
+        else:
+            scaled_features = feature_scaler.transform(program_features_array) if program_features_array.size else program_features_array
+        print("Program features scaler fitted." if program_features_array.size else "No program features to scale.")
+
+        if target_metric_scaler is None:
+            target_metric_scaler = StandardScaler()
+            if target_metrics_array.size:
+                scaled_target_metrics = target_metric_scaler.fit_transform(target_metrics_array)
+            else:
+                scaled_target_metrics = target_metrics_array
+        else:
+            scaled_target_metrics = target_metric_scaler.transform(target_metrics_array) if target_metrics_array.size else target_metrics_array
+        print("Target metrics scaler fitted." if target_metrics_array.size else "No target metrics to scale.")
     else:
-        scaled_target_metrics = np.array([], dtype=np.float32).reshape(0, len(target_metrics))
-    print("Target metrics scaler fitted.")
+        scaled_features = program_features_array
+        scaled_target_metrics = target_metrics_array
 
     # Second pass to process all data
     for i, entry in enumerate(raw_data_entries):
@@ -263,17 +275,19 @@ def load_and_preprocess_data(json_data_path, max_seq_len=MAX_PASS_SEQ_LEN, targe
         hardware_tensor = torch.tensor(hardware_id, dtype=torch.long)
 
         # Use already scaled program features
-        program_feature_tensor = torch.tensor(scaled_features[i], dtype=torch.float32)
-
-        # Use already scaled target metrics
-        labels_tensor = torch.tensor(scaled_target_metrics[i], dtype=torch.float32)
+        if scale:
+            program_feature_value = torch.tensor(scaled_features[i], dtype=torch.float32)
+            labels_value = torch.tensor(scaled_target_metrics[i], dtype=torch.float32)
+        else:
+            program_feature_value = np.array(scaled_features[i], dtype=np.float32)
+            labels_value = np.array(scaled_target_metrics[i], dtype=np.float32)
 
         processed_samples.append({
-            'program_features': program_feature_tensor,
+            'program_features': program_feature_value,
             'hardware_id': hardware_tensor,
             'input_sequence': input_sequence_tensor,
             'target_sequence': target_sequence_tensor,
-            'labels': labels_tensor
+            'labels': labels_value
         })
     
     print(f"Processed {len(processed_samples)} samples.")

@@ -9,6 +9,8 @@ import argparse
 from pathlib import Path
 import math
 import os
+import random
+from collections import Counter
 import joblib
 
 # --- Configuration ---
@@ -16,10 +18,11 @@ MAX_PASS_SEQ_LEN = 60
 TARGET_METRICS = ['execution_time', 'binary_size']
 D_MODEL = 128
 NHEAD = 4
-NUM_DECODER_LAYERS = 2
+NUM_DECODER_LAYERS = 4
 DIM_FEEDFORWARD = 256
 FEATURE_MLP_LAYERS = [64, 32]
 DROPOUT = 0.1
+CONTEXT_TOKENS = 7
 
 # --- Utility Functions ---
 
@@ -62,23 +65,105 @@ def calculate_sequence_accuracy(predicted_sequences, target_sequences):
     
     return correct / total if total > 0 else 0.0
 
+# --- Hardware-aware masking ---
+
+def build_allowed_token_mask(hardware_ids, joint_pass_vocab, hardware_vocab, device):
+    """
+    Returns a boolean mask of shape [B, V] indicating which tokens are allowed for each sample
+    given the hardware id. Allowed:
+      - All common (un-tagged) pass tokens
+      - Machine-tagged tokens whose prefix matches the hardware string
+    """
+    # Invert vocabularies
+    id_to_hardware = {v: k for k, v in hardware_vocab.items()}
+    id_to_pass = {v: k for k, v in joint_pass_vocab.items()}
+
+    vocab_size = len(joint_pass_vocab)
+
+    # Precompute common vs tagged tokens once
+    common_token_indices = []
+    tagged_prefix_by_index = {}
+    for tok_id in range(vocab_size):
+        name = id_to_pass.get(tok_id, "")
+        if name in ("<pad>", "<unk>", "<sos>", "<eos>"):
+            common_token_indices.append(tok_id)
+        elif "::" in name:
+            prefix = name.split("::", 1)[0]
+            tagged_prefix_by_index[tok_id] = prefix
+        else:
+            common_token_indices.append(tok_id)
+
+    batch_size = hardware_ids.size(0)
+    mask = torch.zeros((batch_size, vocab_size), dtype=torch.bool, device=device)
+    if batch_size == 0:
+        return mask
+
+    # Unique hardware ids to build per-hardware masks
+    unique_hids = torch.unique(hardware_ids).tolist()
+    per_hw_mask = {}
+    for hid in unique_hids:
+        hw_str = id_to_hardware.get(int(hid), "").lower()
+        hw_mask = torch.zeros(vocab_size, dtype=torch.bool, device=device)
+        # Allow common tokens
+        if common_token_indices:
+            hw_mask[torch.tensor(common_token_indices, device=device)] = True
+        # Allow tagged tokens for matching prefix
+        if hw_str:
+            for tok_id, prefix in tagged_prefix_by_index.items():
+                if prefix == hw_str:
+                    hw_mask[tok_id] = True
+        per_hw_mask[int(hid)] = hw_mask
+
+    # Assemble batch mask
+    for i in range(batch_size):
+        hid = int(hardware_ids[i].item())
+        mask[i] = per_hw_mask.get(hid, torch.zeros(vocab_size, dtype=torch.bool, device=device))
+
+    return mask
+
 # --- Dataset Class ---
 
 class PassGenDataset(Dataset):
-    def __init__(self, processed_samples):
+    def __init__(self, processed_samples, feature_scaler=None, target_metric_scaler=None, pad_id=None):
         self.samples = processed_samples
+        self.feature_scaler = feature_scaler
+        self.target_metric_scaler = target_metric_scaler
+        self.pad_id = pad_id
 
     def __len__(self):
         return len(self.samples)
 
+    def set_scalers(self, feature_scaler, target_metric_scaler):
+        self.feature_scaler = feature_scaler
+        self.target_metric_scaler = target_metric_scaler
+
+    @staticmethod
+    def _to_numpy(value):
+        if isinstance(value, np.ndarray):
+            return value.astype(np.float32)
+        if torch.is_tensor(value):
+            return value.detach().cpu().numpy().astype(np.float32)
+        return np.array(value, dtype=np.float32)
+
     def __getitem__(self, idx):
         sample = self.samples[idx]
+
+        features = self._to_numpy(sample['program_features'])
+        if self.feature_scaler is not None and features.size:
+            features = self.feature_scaler.transform(features.reshape(1, -1))[0]
+        program_features = torch.tensor(features, dtype=torch.float32)
+
+        labels = self._to_numpy(sample['labels'])
+        if self.target_metric_scaler is not None and labels.size:
+            labels = self.target_metric_scaler.transform(labels.reshape(1, -1))[0]
+        labels_tensor = torch.tensor(labels, dtype=torch.float32)
+
         return (
-            sample['program_features'],
+            program_features,
             sample['hardware_id'],
             sample['input_sequence'],
             sample['target_sequence'],
-            sample['labels']
+            labels_tensor
         )
 
 # --- Model Architecture ---
@@ -105,16 +190,18 @@ class PassGenTransformer(nn.Module):
     """Transformer-based sequence generation model for compiler passes."""
     def __init__(self, vocab_size, num_features, hardware_vocab_size, 
                  d_model, nhead, num_decoder_layers, dim_feedforward, feature_mlp_layers, 
-                 max_seq_len, dropout=0.1):
+                 max_seq_len, dropout=0.1, context_tokens=CONTEXT_TOKENS):
         super().__init__()
         self.d_model = d_model
         self.max_seq_len = max_seq_len
         self.vocab_size = vocab_size
+        self.context_tokens = context_tokens
 
         # Embeddings
         self.pass_embedding = nn.Embedding(vocab_size, d_model)
         self.hardware_embedding = nn.Embedding(hardware_vocab_size, d_model)
         self.pos_encoder = PositionalEncoding(d_model, dropout, max_seq_len)
+        self.sequence_dropout = nn.Dropout(dropout)
 
         # Program Feature MLP
         mlp_layers = []
@@ -126,6 +213,9 @@ class PassGenTransformer(nn.Module):
             input_dim = layer_dim
         self.feature_mlp = nn.Sequential(*mlp_layers)
         self.feature_projection = nn.Linear(input_dim, d_model)
+        self.context_projection = nn.Linear(input_dim, d_model * context_tokens)
+        self.context_pos_encoder = PositionalEncoding(d_model, dropout, context_tokens + 2)
+        self.context_dropout = nn.Dropout(dropout)
 
         # Transformer Decoder
         decoder_layer = nn.TransformerDecoderLayer(d_model, nhead, dim_feedforward, dropout, batch_first=True)
@@ -142,20 +232,32 @@ class PassGenTransformer(nn.Module):
             nn.Linear(d_model // 2, len(TARGET_METRICS))
         )
 
-    def forward(self, program_features, hardware_ids, input_sequence, tgt_key_padding_mask=None):
-        # Process Program Features
+    def _build_context(self, program_features, hardware_ids):
+        """Encode program features and hardware into decoder memory tokens."""
+        batch_size = program_features.size(0)
         feature_representation = self.feature_mlp(program_features)
         feature_proj = self.feature_projection(feature_representation)
+        feature_tokens = self.context_projection(feature_representation)
+        feature_tokens = feature_tokens.view(batch_size, self.context_tokens, self.d_model)
 
-        # Process Hardware
         hardware_emb = self.hardware_embedding(hardware_ids)
 
-        # Combine context (program features + hardware)
-        context = torch.cat([feature_proj.unsqueeze(1), hardware_emb.unsqueeze(1)], dim=1)
+        context_tokens = torch.cat(
+            [feature_proj.unsqueeze(1), feature_tokens, hardware_emb.unsqueeze(1)], dim=1
+        )
+        context_tokens = self.context_pos_encoder(context_tokens)
+        context_tokens = self.context_dropout(context_tokens)
+
+        regression_input = feature_proj + hardware_emb
+        return context_tokens, regression_input
+
+    def forward(self, program_features, hardware_ids, input_sequence, tgt_key_padding_mask=None, allowed_token_mask=None):
+        context, regression_input = self._build_context(program_features, hardware_ids)
 
         # Process Input Sequence
         input_emb = self.pass_embedding(input_sequence)
         input_emb = self.pos_encoder(input_emb)
+        input_emb = self.sequence_dropout(input_emb)
 
         # Generate causal mask
         tgt_mask = nn.Transformer.generate_square_subsequent_mask(input_sequence.size(1)).to(input_sequence.device)
@@ -165,140 +267,200 @@ class PassGenTransformer(nn.Module):
 
         # Output predictions
         output = self.output_head(decoder_output)
+        # Apply hardware-aware mask to logits if provided: disallow tokens by setting -inf
+        if allowed_token_mask is not None:
+            # allowed_token_mask: [B, V] -> expand to [B, T, V]
+            B, T, V = output.shape
+            expanded = allowed_token_mask.unsqueeze(1).expand(B, T, V)
+            output = output.masked_fill(~expanded, -1e9)
 
         # Auxiliary metrics prediction
-        predicted_metrics = self.regression_head(feature_proj)
+        predicted_metrics = self.regression_head(regression_input)
 
         return output, predicted_metrics
 
-    def generate_sequence_greedy(self, program_features, hardware_ids, start_token, end_token, pad_token, device, max_len=MAX_PASS_SEQ_LEN):
-        """Generate sequences using greedy decoding."""
-        self.eval()
-        batch_size = program_features.size(0)
+def _generate_sequence_greedy(self, program_features, hardware_ids, start_token, end_token, pad_token,
+                              device, max_len=MAX_PASS_SEQ_LEN, allowed_token_mask=None):
+    """Autoregressive greedy decoding for inference."""
+    self.eval()
+    batch_size = program_features.size(0)
 
-        # Prepare context
-        feature_representation = self.feature_mlp(program_features)
-        feature_proj = self.feature_projection(feature_representation)
-        hardware_emb = self.hardware_embedding(hardware_ids)
-        context = torch.cat([feature_proj.unsqueeze(1), hardware_emb.unsqueeze(1)], dim=1)
+    context, _ = self._build_context(program_features, hardware_ids)
+    generated_sequences = torch.full((batch_size, 1), start_token, dtype=torch.long, device=device)
 
-        # Initialize with start token
-        generated_sequences = torch.full((batch_size, 1), start_token, dtype=torch.long, device=device)
+    with torch.no_grad():
+        finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
+        for _ in range(max_len - 1):
+            input_emb = self.pass_embedding(generated_sequences)
+            input_emb = self.pos_encoder(input_emb)
+            tgt_mask = nn.Transformer.generate_square_subsequent_mask(generated_sequences.size(1)).to(device)
+            decoder_output = self.transformer_decoder(input_emb, context, tgt_mask=tgt_mask)
+            next_token_logits = self.output_head(decoder_output[:, -1, :])
+            if allowed_token_mask is not None:
+                next_token_logits = next_token_logits.masked_fill(~allowed_token_mask, -1e9)
+            next_token_logits[:, pad_token] = -1e9
+            next_token_logits[:, start_token] = -1e9
 
-        with torch.no_grad():
-            finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
-            for t in range(max_len - 1):
-                # Embed current sequence
-                input_emb = self.pass_embedding(generated_sequences)
-                input_emb = self.pos_encoder(input_emb)
-
-                # Generate causal mask
-                tgt_mask = nn.Transformer.generate_square_subsequent_mask(generated_sequences.size(1)).to(device)
-
-                # Decode
-                decoder_output = self.transformer_decoder(input_emb, context, tgt_mask=tgt_mask)
-
-                # Get next token logits (only last step)
-                next_token_logits = self.output_head(decoder_output[:, -1, :])
-
-                # Forbid selecting special tokens during generation (except EOS)
-                next_token_logits[:, pad_token] = -1e9
-                next_token_logits[:, start_token] = -1e9
-
-                # Pick next tokens greedily
-                next_tokens = torch.argmax(next_token_logits, dim=-1, keepdim=True)
-
-                # Once finished, force pad to keep sequence stable
-                next_tokens[finished] = pad_token
-
-                # Append to generated sequence
-                generated_sequences = torch.cat([generated_sequences, next_tokens], dim=1)
-
-                # Update finished mask and break if all finished
-                finished = finished | (next_tokens.squeeze(-1) == end_token)
-                if finished.all():
-                    break
-
-        # Pad to max_len if needed
-        if generated_sequences.size(1) < max_len:
-            padding = torch.full((batch_size, max_len - generated_sequences.size(1)), pad_token, dtype=torch.long, device=device)
-            generated_sequences = torch.cat([generated_sequences, padding], dim=1)
-        
-        return generated_sequences[:, :max_len]
-
-    def generate_sequence_beam(self, program_features, hardware_ids, start_token, end_token, pad_token, device, max_len=MAX_PASS_SEQ_LEN, beam_size=5, length_penalty=0.6, min_len: int = 3, repetition_penalty: float = 1.2):
-        """Beam search decoding. Returns tensor [B, max_len]."""
-        self.eval()
-        batch_size = program_features.size(0)
-
-        # Prepare context once per sample
-        with torch.no_grad():
-            feature_representation = self.feature_mlp(program_features)
-            feature_proj = self.feature_projection(feature_representation)
-            hardware_emb = self.hardware_embedding(hardware_ids)
-            context = torch.cat([feature_proj.unsqueeze(1), hardware_emb.unsqueeze(1)], dim=1)
-
-            results = []
-            for b in range(batch_size):
-                ctx = context[b:b+1]
-                beams = [ (torch.tensor([[start_token]], device=device, dtype=torch.long), 0.0, False) ]
-
-                for t in range(max_len - 1):
-                    new_beams = []
-                    all_finished = True
-                    for seq, score, finished in beams:
-                        if finished:
-                            new_beams.append((seq, score, True))
+            # Repetition penalties to discourage degenerative loops
+            if generated_sequences.size(1) > 1:
+                for b in range(batch_size):
+                    seq_tokens = generated_sequences[b].tolist()
+                    token_counts = Counter(seq_tokens)
+                    for tok, count in token_counts.items():
+                        if tok in (pad_token, start_token, end_token):
                             continue
-                        all_finished = False
-                        # Decode current prefix
-                        input_emb = self.pass_embedding(seq)
-                        input_emb = self.pos_encoder(input_emb)
-                        tgt_mask = nn.Transformer.generate_square_subsequent_mask(seq.size(1)).to(device)
-                        dec_out = self.transformer_decoder(input_emb, ctx, tgt_mask=tgt_mask)
-                        logits = self.output_head(dec_out[:, -1, :])  # [1, vocab]
-                        # Forbid pad and sos
-                        logits[:, pad_token] = -1e9
-                        logits[:, start_token] = -1e9
-                        # Avoid immediate termination: disallow EOS before min_len
-                        if seq.size(1) < min_len:
-                            logits[:, end_token] = -1e9
-                        # Repetition penalty to reduce loops
-                        if repetition_penalty is not None and repetition_penalty > 1.0:
-                            seen = torch.unique(seq)
-                            logits[:, seen] -= math.log(repetition_penalty)
-                        log_probs = torch.log_softmax(logits, dim=-1)
-                        # Select top-k expansions
-                        topk_logp, topk_idx = torch.topk(log_probs, k=beam_size, dim=-1)
-                        for k in range(beam_size):
-                            nt = topk_idx[0, k].view(1, 1)
-                            nlp = topk_logp[0, k].item()
-                            new_seq = torch.cat([seq, nt], dim=1)
-                            # Length normalization
-                            L = new_seq.size(1)
-                            norm = ((5 + L) / 6) ** length_penalty
-                            new_score = (score + nlp) / norm
-                            new_finished = (nt.item() == end_token)
-                            new_beams.append((new_seq, new_score, new_finished))
-                    # Keep top beam_size beams
-                    new_beams.sort(key=lambda x: x[1], reverse=True)
-                    beams = new_beams[:beam_size]
-                    if all_finished:
-                        break
+                        if count >= 3:
+                            next_token_logits[b, tok] -= 0.5 * (count - 2)
+                    last_tok = seq_tokens[-1]
+                    if last_tok not in (pad_token, start_token, end_token):
+                        next_token_logits[b, last_tok] -= 0.3
 
-                # Pick best beam
-                best_seq = max(beams, key=lambda x: x[1])[0]
-                # Pad to max_len
-                if best_seq.size(1) < max_len:
-                    pad_tail = torch.full((1, max_len - best_seq.size(1)), pad_token, dtype=torch.long, device=device)
-                    best_seq = torch.cat([best_seq, pad_tail], dim=1)
-                results.append(best_seq[:, :max_len])
+            next_tokens = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+            next_tokens[finished] = pad_token
+            generated_sequences = torch.cat([generated_sequences, next_tokens], dim=1)
 
-            return torch.cat(results, dim=0)
+            finished = finished | (next_tokens.squeeze(-1) == end_token)
+            if finished.all():
+                break
+
+    if generated_sequences.size(1) < max_len:
+        padding = torch.full((batch_size, max_len - generated_sequences.size(1)), pad_token, dtype=torch.long, device=device)
+        generated_sequences = torch.cat([generated_sequences, padding], dim=1)
+
+    return generated_sequences[:, :max_len]
+
 
 # --- Training and Evaluation Functions ---
 
-def train_epoch(model, dataloader, optimizer, criterion, regression_criterion, regression_loss_weight, device, pad_id):
+
+def _generate_sequence_beam(
+    self,
+    program_features,
+    hardware_ids,
+    start_token,
+    end_token,
+    pad_token,
+    device,
+    max_len=MAX_PASS_SEQ_LEN,
+    beam_size=5,
+    length_penalty=0.6,
+    min_len: int = 3,
+    repetition_penalty: float = 1.2,
+    allowed_token_mask=None,
+):
+    """Beam search decoding. Returns tensor [B, max_len]."""
+    self.eval()
+    batch_size = program_features.size(0)
+
+    with torch.no_grad():
+        context, _ = self._build_context(program_features, hardware_ids)
+
+        results = []
+        for b in range(batch_size):
+            ctx = context[b:b + 1]
+            allowed_mask_b = None
+            if allowed_token_mask is not None:
+                allowed_mask_b = allowed_token_mask[b:b + 1].clone()
+            beams = [(torch.tensor([[start_token]], device=device, dtype=torch.long), 0.0, False)]
+
+            for _ in range(max_len - 1):
+                new_beams = []
+                all_finished = True
+                for seq, score, finished in beams:
+                    if finished:
+                        new_beams.append((seq, score, True))
+                        continue
+                    all_finished = False
+                    input_emb = self.pass_embedding(seq)
+                    input_emb = self.pos_encoder(input_emb)
+                    tgt_mask = nn.Transformer.generate_square_subsequent_mask(seq.size(1)).to(device)
+                    dec_out = self.transformer_decoder(input_emb, ctx, tgt_mask=tgt_mask)
+                    logits = self.output_head(dec_out[:, -1, :])
+                    logits[:, pad_token] = -1e9
+                    logits[:, start_token] = -1e9
+                    if seq.size(1) < min_len:
+                        logits[:, end_token] = -1e9
+                    if allowed_mask_b is not None:
+                        logits = logits.masked_fill(~allowed_mask_b, -1e9)
+                    if repetition_penalty is not None and repetition_penalty > 1.0:
+                        seen = torch.unique(seq)
+                        logits[:, seen] -= math.log(repetition_penalty)
+                    if seq.size(1) > 1:
+                        seq_tokens = seq.view(-1).tolist()
+                        token_counts = Counter(seq_tokens)
+                        for tok, count in token_counts.items():
+                            if tok in (pad_token, start_token, end_token):
+                                continue
+                            if count >= 3:
+                                logits[0, tok] -= 0.5 * (count - 2)
+                        last_tok = seq_tokens[-1]
+                        if last_tok not in (pad_token, start_token, end_token):
+                            logits[0, last_tok] -= 0.3
+                    log_probs = torch.log_softmax(logits, dim=-1)
+                    topk_logp, topk_idx = torch.topk(log_probs, k=beam_size, dim=-1)
+                    for k in range(beam_size):
+                        nt = topk_idx[0, k].view(1, 1)
+                        nlp = topk_logp[0, k].item()
+                        new_seq = torch.cat([seq, nt], dim=1)
+                        length_norm = ((5 + new_seq.size(1)) / 6) ** length_penalty
+                        new_score = (score + nlp) / length_norm
+                        finished_flag = (nt.item() == end_token)
+                        new_beams.append((new_seq, new_score, finished_flag))
+                new_beams.sort(key=lambda x: x[1], reverse=True)
+                beams = new_beams[:beam_size]
+                if all_finished:
+                    break
+
+            best_seq = max(beams, key=lambda x: x[1])[0]
+            if best_seq.size(1) < max_len:
+                pad_tail = torch.full((1, max_len - best_seq.size(1)), pad_token, dtype=torch.long, device=device)
+                best_seq = torch.cat([best_seq, pad_tail], dim=1)
+            results.append(best_seq[:, :max_len])
+
+        return torch.cat(results, dim=0)
+
+
+# Attach helper as class method to avoid indentation collisions.
+PassGenTransformer.generate_sequence_greedy = _generate_sequence_greedy
+PassGenTransformer.generate_sequence_beam = _generate_sequence_beam
+
+
+def sample_random_prefix_batch(input_sequence, target_sequence, pad_id,
+                               min_prefix_tokens=1, max_prefix_tokens=None):
+    """Randomly truncate sequences to expose many prefix→next-token examples.
+
+    With almost-unique 60-token targets, full-length teacher forcing provides
+    sparse supervision. Sampling prefixes each iteration teaches the decoder
+    local transitions without discarding samples. A curriculum can limit the
+    maximum prefix length via ``max_prefix_tokens``.
+    """
+    if min_prefix_tokens < 1:
+        min_prefix_tokens = 1
+
+    batch_size = input_sequence.size(0)
+    prefix_inputs = torch.full_like(input_sequence, pad_id)
+    prefix_targets = torch.full_like(target_sequence, pad_id)
+
+    input_cpu = input_sequence.detach().cpu()
+    target_cpu = target_sequence.detach().cpu()
+
+    for idx in range(batch_size):
+        valid_len = int((target_cpu[idx] != pad_id).sum().item())
+        if valid_len <= 0:
+            prefix_len = 1
+        else:
+            upper = valid_len if max_prefix_tokens is None else min(valid_len, max_prefix_tokens)
+            upper = max(upper, min_prefix_tokens)
+            prefix_len = random.randint(min_prefix_tokens, upper)
+
+        prefix_inputs[idx, :prefix_len] = input_cpu[idx, :prefix_len]
+        prefix_targets[idx, :prefix_len] = target_cpu[idx, :prefix_len]
+
+    return prefix_inputs.to(input_sequence.device), prefix_targets.to(target_sequence.device)
+
+def train_epoch(model, dataloader, optimizer, criterion, regression_criterion, regression_loss_weight,
+                device, pad_id, joint_pass_vocab, hardware_vocab, next_token_mode=False,
+                min_prefix_tokens=1, max_prefix_tokens=None):
     model.train()
     total_loss = 0
     total_seq_loss = 0
@@ -312,16 +474,29 @@ def train_epoch(model, dataloader, optimizer, criterion, regression_criterion, r
         labels = labels.to(device)
 
         optimizer.zero_grad()
-        tgt_key_padding_mask = (input_sequence == pad_id)
-        predictions, predicted_metrics = model(program_features, hardware_ids, input_sequence, tgt_key_padding_mask=tgt_key_padding_mask)
 
-        # Ensure target_sequence is long and check shapes before loss
-        target_sequence = target_sequence.long()
-        assert predictions.view(-1, model.vocab_size).shape[0] == target_sequence.view(-1).shape[0], \
-            f"Shape mismatch: predictions {predictions.view(-1, model.vocab_size).shape} vs target {target_sequence.view(-1).shape}"
+        seq_inputs = input_sequence
+        seq_targets = target_sequence
+        if next_token_mode:
+            seq_inputs, seq_targets = sample_random_prefix_batch(
+                input_sequence, target_sequence, pad_id,
+                min_prefix_tokens=min_prefix_tokens, max_prefix_tokens=max_prefix_tokens
+            )
+
+        tgt_key_padding_mask = (seq_inputs == pad_id)
+        allowed_mask = build_allowed_token_mask(hardware_ids, joint_pass_vocab, hardware_vocab, device)
+        predictions, predicted_metrics = model(
+            program_features, hardware_ids, seq_inputs,
+            tgt_key_padding_mask=tgt_key_padding_mask,
+            allowed_token_mask=allowed_mask
+        )
+
+        seq_targets = seq_targets.long()
+        assert predictions.view(-1, model.vocab_size).shape[0] == seq_targets.view(-1).shape[0], \
+            f"Shape mismatch: predictions {predictions.view(-1, model.vocab_size).shape} vs target {seq_targets.view(-1).shape}"
 
         # Sequence generation loss
-        seq_gen_loss = criterion(predictions.view(-1, model.vocab_size), target_sequence.view(-1))
+        seq_gen_loss = criterion(predictions.view(-1, model.vocab_size), seq_targets.view(-1))
         
         # Regression loss
         reg_loss = regression_criterion(predicted_metrics, labels)
@@ -342,7 +517,7 @@ def train_epoch(model, dataloader, optimizer, criterion, regression_criterion, r
     
     return avg_loss, avg_seq_loss, avg_reg_loss
 
-def evaluate_epoch(model, dataloader, criterion, regression_criterion, regression_loss_weight, device, joint_pass_vocab, target_metric_scaler):
+def evaluate_epoch(model, dataloader, criterion, regression_criterion, regression_loss_weight, device, joint_pass_vocab, target_metric_scaler, hardware_vocab):
     model.eval()
     total_loss = 0
     all_predicted_sequences = []
@@ -364,7 +539,12 @@ def evaluate_epoch(model, dataloader, criterion, regression_criterion, regressio
 
             # Forward pass
             tgt_key_padding_mask = (input_sequence == joint_pass_vocab["<pad>"])
-            predictions, predicted_metrics = model(program_features, hardware_ids, input_sequence, tgt_key_padding_mask=tgt_key_padding_mask)
+            allowed_mask = build_allowed_token_mask(hardware_ids, joint_pass_vocab, hardware_vocab, device)
+            predictions, predicted_metrics = model(
+                program_features, hardware_ids, input_sequence,
+                tgt_key_padding_mask=tgt_key_padding_mask,
+                allowed_token_mask=allowed_mask
+            )
             seq_gen_loss = criterion(predictions.view(-1, model.vocab_size), target_sequence.view(-1))
             reg_loss = regression_criterion(predicted_metrics, labels)
             loss = seq_gen_loss + (regression_loss_weight * reg_loss)
@@ -384,7 +564,8 @@ def evaluate_epoch(model, dataloader, criterion, regression_criterion, regressio
                 joint_pass_vocab["<eos>"],
                 joint_pass_vocab["<pad>"],
                 device,
-                MAX_PASS_SEQ_LEN
+                MAX_PASS_SEQ_LEN,
+                allowed_token_mask=allowed_mask
             )
             
             all_predicted_sequences.extend(generated_sequences.tolist())
@@ -408,8 +589,6 @@ def evaluate_epoch(model, dataloader, criterion, regression_criterion, regressio
 
     # Calculate metrics
     ngram_overlap_scores = calculate_ngram_overlap(filtered_predicted, filtered_target, n_grams=[1, 2, 3, 4])
-    # Exact match of entire sequence (typically strict/low)
-    seq_exact_match = calculate_sequence_accuracy(filtered_predicted, filtered_target)
     # Token-level accuracy from teacher-forced logits
     seq_token_accuracy = (token_correct / token_total) if token_total > 0 else 0.0
     
@@ -425,7 +604,6 @@ def evaluate_epoch(model, dataloader, criterion, regression_criterion, regressio
         'loss': total_loss / len(dataloader),
         'ngram_overlap': ngram_overlap_scores,
         'seq_accuracy': seq_token_accuracy,
-        'seq_exact_match': seq_exact_match,
         'runtime_mae': runtime_mae,
         'binary_size_mae': binary_size_mae
     }
@@ -444,13 +622,15 @@ def main():
                         help="Batch size for training.")
     parser.add_argument("--lr", type=float, default=1e-4,
                         help="Learning rate.")
-    parser.add_argument("--regression_loss_weight", type=float, default=0.01,
+    parser.add_argument("--regression_loss_weight", type=float, default=0.001,
                         help="Weight for regression loss.")
+    parser.add_argument("--label_smoothing", type=float, default=0.0,
+                        help="Label smoothing for sequence loss (0.0 disables).")
     parser.add_argument("--d_model", type=int, default=128,
                         help="Dimension of the model (d_model).")
     parser.add_argument("--nhead", type=int, default=4,
                         help="Number of attention heads in the Transformer.")
-    parser.add_argument("--num_decoder_layers", type=int, default=2,
+    parser.add_argument("--num_decoder_layers", type=int, default=4,
                         help="Number of decoder layers in the Transformer.")
     parser.add_argument("--dim_feedforward", type=int, default=256,
                         help="Dimension of the feedforward network in the Transformer.")
@@ -458,6 +638,16 @@ def main():
                         help="List of layer dimensions for the feature MLP.")
     parser.add_argument("--dropout", type=float, default=0.1,
                         help="Dropout rate.")
+    parser.add_argument("--next_token_mode", action="store_true",
+                        help="Enable random prefix next-token training to emphasise subsequence patterns.")
+    parser.add_argument("--warmup_epochs", type=int, default=5,
+                        help="Number of initial epochs to suppress regression loss for decoder warm-up.")
+    parser.add_argument("--curriculum_epochs", type=int, default=10,
+                        help="Epochs over which to ramp prefix length from curriculum_min_len to full length.")
+    parser.add_argument("--curriculum_min_len", type=int, default=8,
+                        help="Minimum prefix length used at the start of the curriculum.")
+    parser.add_argument("--min_prefix_len", type=int, default=4,
+                        help="Lower bound for sampled prefix lengths during next-token training.")
     
     args = parser.parse_args()
 
@@ -471,8 +661,8 @@ def main():
     print("Loading and preprocessing data...")
     try:
         from data_preprocessing_hybrid import load_and_preprocess_data
-        processed_samples, feature_scaler, feature_keys, joint_pass_vocab, hardware_vocab, target_metric_scaler = \
-            load_and_preprocess_data(args.input_json, MAX_PASS_SEQ_LEN, TARGET_METRICS)
+        processed_samples, _, feature_keys, joint_pass_vocab, hardware_vocab, _ = \
+            load_and_preprocess_data(args.input_json, MAX_PASS_SEQ_LEN, TARGET_METRICS, scale=False)
 
         # Save preprocessing artifacts
         preprocessing_output_path = Path("preprocessing_output")
@@ -485,8 +675,7 @@ def main():
         with open(preprocessing_output_path / "feature_keys.json", 'w') as f:
             json.dump(feature_keys, f, indent=2)
         
-        joblib.dump(feature_scaler, preprocessing_output_path / "feature_scaler.pkl")
-        joblib.dump(target_metric_scaler, preprocessing_output_path / "target_metric_scaler.pkl")
+        # Scalers will be fitted on the training split to avoid leakage and saved after fitting
         
         print(f"Preprocessing artifacts saved to {preprocessing_output_path}")
 
@@ -498,12 +687,25 @@ def main():
 
     # Create dataset
     print("Creating dataset...")
-    full_dataset = PassGenDataset(processed_samples)
+    full_dataset = PassGenDataset(processed_samples, pad_id=joint_pass_vocab["<pad>"])
 
     # Train/validation split
     train_size = int(0.8 * len(full_dataset))
     val_size = len(full_dataset) - train_size
     train_dataset, val_dataset = torch.utils.data.random_split(full_dataset, [train_size, val_size])
+
+    # Fit scalers using only the training subset
+    train_indices = train_dataset.indices
+    train_features = np.stack([processed_samples[i]['program_features'] for i in train_indices]) if train_indices else np.empty((0, len(feature_keys)), dtype=np.float32)
+    train_labels = np.stack([processed_samples[i]['labels'] for i in train_indices]) if train_indices else np.empty((0, len(TARGET_METRICS)), dtype=np.float32)
+
+    feature_scaler = StandardScaler().fit(train_features) if train_features.size else StandardScaler()
+    target_metric_scaler = StandardScaler().fit(train_labels) if train_labels.size else StandardScaler()
+
+    full_dataset.set_scalers(feature_scaler, target_metric_scaler)
+
+    joblib.dump(feature_scaler, preprocessing_output_path / "feature_scaler.pkl")
+    joblib.dump(target_metric_scaler, preprocessing_output_path / "target_metric_scaler.pkl")
 
     train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
     val_dataloader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
@@ -522,11 +724,12 @@ def main():
         dim_feedforward=args.dim_feedforward,
         feature_mlp_layers=args.feature_mlp_layers,
         max_seq_len=MAX_PASS_SEQ_LEN,
-        dropout=args.dropout
+        dropout=args.dropout,
+        context_tokens=CONTEXT_TOKENS
     ).to(device)
 
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
-    criterion = nn.CrossEntropyLoss(ignore_index=joint_pass_vocab["<pad>"])
+    criterion = nn.CrossEntropyLoss(ignore_index=joint_pass_vocab["<pad>"], label_smoothing=max(0.0, min(0.99, args.label_smoothing)))
     regression_criterion = nn.MSELoss()
 
     print(f"Model parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
@@ -538,21 +741,36 @@ def main():
     pad_id = joint_pass_vocab["<pad>"]
 
     for epoch in range(args.epochs):
+        if args.warmup_epochs > 0 and epoch < args.warmup_epochs:
+            effective_reg_weight = 0.0
+        else:
+            effective_reg_weight = args.regression_loss_weight
+
+        if args.curriculum_epochs > 0 and epoch < args.curriculum_epochs:
+            ratio = (epoch + 1) / args.curriculum_epochs
+            target_max = MAX_PASS_SEQ_LEN
+            curriculum_min = min(args.curriculum_min_len, target_max)
+            max_prefix = int(curriculum_min + ratio * (target_max - curriculum_min))
+            max_prefix = max(max_prefix, curriculum_min)
+        else:
+            max_prefix = None
+
         train_loss, train_seq_loss, train_reg_loss = train_epoch(
-            model, train_dataloader, optimizer, criterion, 
-            regression_criterion, args.regression_loss_weight, device, pad_id
+            model, train_dataloader, optimizer, criterion,
+            regression_criterion, effective_reg_weight, device, pad_id,
+            joint_pass_vocab, hardware_vocab, next_token_mode=args.next_token_mode,
+            min_prefix_tokens=max(args.min_prefix_len, 1), max_prefix_tokens=max_prefix
         )
         
         val_metrics = evaluate_epoch(
-            model, val_dataloader, criterion, regression_criterion, 
-            args.regression_loss_weight, device, joint_pass_vocab, target_metric_scaler
+            model, val_dataloader, criterion, regression_criterion,
+            effective_reg_weight, device, joint_pass_vocab, target_metric_scaler, hardware_vocab
         )
 
         print(f"\nEpoch {epoch+1}/{args.epochs}")
         print(f"  Train Loss: {train_loss:.4f} (Seq: {train_seq_loss:.4f}, Reg: {train_reg_loss:.4f})")
         print(f"  Val Loss: {val_metrics['loss']:.4f}")
         print(f"  Seq Token Acc: {val_metrics['seq_accuracy']:.4f}")
-        print(f"  Seq Exact Match: {val_metrics['seq_exact_match']:.4f}")
         print(f"  1-gram overlap: {val_metrics['ngram_overlap']['1-gram_overlap']:.4f}")
         print(f"  2-gram overlap: {val_metrics['ngram_overlap']['2-gram_overlap']:.4f}")
         print(f"  Runtime MAE: {val_metrics['runtime_mae']:.4f}")
@@ -561,7 +779,7 @@ def main():
         # Save best model
         if val_metrics['loss'] < best_val_loss:
             best_val_loss = val_metrics['loss']
-            print("  → Saving best model")
+            print("  -> Saving best model")
             
             torch.save({
                 'epoch': epoch,
@@ -582,6 +800,8 @@ def main():
                     'feature_mlp_layers': FEATURE_MLP_LAYERS,
                     'max_seq_len': MAX_PASS_SEQ_LEN,
                     'dropout': DROPOUT,
+                    'context_tokens': CONTEXT_TOKENS,
+                    'next_token_mode': args.next_token_mode,
                 }
             }, output_path / "passgen_transformer_best.pth")
 

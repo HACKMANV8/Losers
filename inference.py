@@ -7,7 +7,7 @@ import joblib
 import numpy as np
 
 # Import necessary components
-from train_passformer_seqgen import PassGenTransformer, MAX_PASS_SEQ_LEN, TARGET_METRICS
+from train_passformer_seqgen import PassGenTransformer, MAX_PASS_SEQ_LEN, TARGET_METRICS, CONTEXT_TOKENS, build_allowed_token_mask
 from data_preprocessing_hybrid import load_and_preprocess_data
 
 def calculate_simple_overlap(pred_seq, target_seq):
@@ -49,7 +49,8 @@ def load_model_and_artifacts(model_path, preprocessing_output_path):
         dim_feedforward=model_config['dim_feedforward'],
         feature_mlp_layers=model_config['feature_mlp_layers'],
         max_seq_len=model_config['max_seq_len'],
-        dropout=model_config['dropout']
+        dropout=model_config['dropout'],
+        context_tokens=model_config.get('context_tokens', CONTEXT_TOKENS)
     )
     
     # Load model weights
@@ -110,7 +111,7 @@ def main():
     # Load and preprocess data
     print(f"\nLoading data from {args.input_json}...")
     processed_samples, _, _, _, _, _ = load_and_preprocess_data(
-        args.input_json, MAX_PASS_SEQ_LEN, TARGET_METRICS
+        args.input_json, MAX_PASS_SEQ_LEN, TARGET_METRICS, scale=False
     )
     print(f"Loaded {len(processed_samples)} samples")
 
@@ -139,15 +140,22 @@ def main():
 
     for sample_num, sample_idx in enumerate(sample_indices, 1):
         sample = processed_samples[sample_idx]
-        
+
         # Extract sample data
-        program_features = sample['program_features'].unsqueeze(0).to(device)
+        raw_features = np.array(sample['program_features'], dtype=np.float32)
+        scaled_features = feature_scaler.transform(raw_features.reshape(1, -1))[0]
+        program_features = torch.tensor(scaled_features, dtype=torch.float32, device=device).unsqueeze(0)
+
         hardware_id = sample['hardware_id'].unsqueeze(0).to(device)
         target_sequence = sample['target_sequence']
-        target_labels = sample['labels']
+
+        raw_target_labels = np.array(sample['labels'], dtype=np.float32)
+        scaled_labels = target_metric_scaler.transform(raw_target_labels.reshape(1, -1))[0]
+        target_labels = torch.tensor(scaled_labels, dtype=torch.float32)
 
         # Generate sequence
         with torch.no_grad():
+            allowed_mask = build_allowed_token_mask(hardware_id, joint_pass_vocab, hardware_vocab, device)
             if args.decode == "beam" and args.beam_size > 1:
                 generated_sequence = model.generate_sequence_beam(
                     program_features,
@@ -157,7 +165,8 @@ def main():
                     joint_pass_vocab["<pad>"],
                     device,
                     MAX_PASS_SEQ_LEN,
-                    beam_size=args.beam_size
+                    beam_size=args.beam_size,
+                    allowed_token_mask=allowed_mask
                 )
             else:
                 generated_sequence = model.generate_sequence_greedy(
@@ -167,7 +176,8 @@ def main():
                     joint_pass_vocab["<eos>"],
                     joint_pass_vocab["<pad>"],
                     device,
-                    MAX_PASS_SEQ_LEN
+                    MAX_PASS_SEQ_LEN,
+                    allowed_token_mask=allowed_mask
                 )
             generated_sequence = generated_sequence.squeeze(0)  # Remove batch dimension
             

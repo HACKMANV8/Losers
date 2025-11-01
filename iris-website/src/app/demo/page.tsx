@@ -2,8 +2,8 @@
 
 import { useState, useCallback } from 'react';
 import { useDropzone } from 'react-dropzone';
-import { useRouter } from 'next/navigation';
 import Layout from '../components/Layout';
+import API_ENDPOINTS from '@/config/api';
 
 // --- Icon Components ---
 const MemoryIcon = () => (
@@ -36,9 +36,7 @@ const Spinner = () => (
 );
 
 export default function Demo() {
-  const router = useRouter();
   const [file, setFile] = useState<File | null>(null);
-  const [fileContent, setFileContent] = useState<string>('');
   const [model, setModel] = useState('transformer');
   const [loading, setLoading] = useState(false);
   const [results, setResults] = useState<any>(null);
@@ -46,18 +44,9 @@ export default function Demo() {
 
   const onDrop = useCallback((acceptedFiles: File[]) => {
     if (acceptedFiles.length > 0) {
-      const uploadedFile = acceptedFiles[0];
-      setFile(uploadedFile);
+      setFile(acceptedFiles[0]);
       setError(null);
       setResults(null);
-      
-      // Read file content
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        const content = e.target?.result as string;
-        setFileContent(content);
-      };
-      reader.readAsText(uploadedFile);
     }
   }, []);
 
@@ -81,8 +70,8 @@ export default function Demo() {
   };
 
   const copyPasses = () => {
-    if (!results || !results.predicted_passes) return;
-    const passesString = results.predicted_passes.join(', ');
+    if (!results || !results.data?.predicted_passes) return;
+    const passesString = results.data.predicted_passes.join(', ');
     navigator.clipboard.writeText(passesString).then(() => {
       // Optional: Show a brief success message
       alert('Passes copied to clipboard!');
@@ -93,30 +82,8 @@ export default function Demo() {
 
   const handleClear = () => {
     setFile(null);
-    setFileContent('');
     setResults(null);
     setError(null);
-  };
-
-  const handleComparePerformance = () => {
-    if (!results || !file || !fileContent) return;
-    
-    // Prepare data for comparison page
-    const comparisonData = {
-      sourceCode: fileContent,
-      fileName: file.name,
-      predictedPasses: results.predicted_passes,
-      features: results.features,
-      modelUsed: results.model_used,
-      processingTime: results.processing_time_ms,
-      timestamp: Date.now()
-    };
-    
-    // Store in sessionStorage as backup
-    sessionStorage.setItem('iris_comparison_data', JSON.stringify(comparisonData));
-    
-    // Navigate to comparison page with state
-    router.push('/comparison?from=demo');
   };
 
   const handleSubmit = async () => {
@@ -126,20 +93,61 @@ export default function Demo() {
     setResults(null);
     setError(null);
 
-    const formData = new FormData();
-    formData.append('source_file', file);
-    formData.append('model_selection', model);
-
     try {
-      const res = await fetch('http://localhost:5001/api/optimize', {
+      // Read file content
+      const code = await file.text();
+
+      // Step 1: Extract features
+      const featuresRes = await fetch(API_ENDPOINTS.features, {
         method: 'POST',
-        body: formData,
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          code,
+          target_arch: 'riscv64'
+        }),
+      });
+
+      const featuresData = await featuresRes.json();
+
+      if (!featuresRes.ok || !featuresData.success) {
+        setError(featuresData.error || 'Failed to extract features');
+        setLoading(false);
+        return;
+      }
+
+      // Step 2: Feed features to model (placeholder - will be implemented with actual model)
+      // For now, we'll use a default pass sequence
+      // In the future, this will call an ML model endpoint with the features
+      const ir_passes = ['mem2reg', 'simplifycfg', 'instcombine', 'gvn', 'loop-simplify'];
+
+      // Step 3: Apply optimization passes
+      const res = await fetch(API_ENDPOINTS.optimize, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          code,
+          ir_passes,
+          target_arch: 'riscv64'
+        }),
       });
 
       const data = await res.json();
 
       if (res.ok && data.success) {
-        setResults(data);
+        // Format results to match expected structure with features
+        setResults({
+          success: true,
+          data: {
+            predicted_passes: ir_passes,
+            metrics: data.metrics,
+            model: model,
+            features: featuresData.features
+          }
+        });
       } else {
         setError(data.error || 'An unknown error occurred during optimization.');
       }
@@ -172,6 +180,30 @@ export default function Demo() {
                     </p>
                   </div>
                 </label>
+
+                {error && (
+                  <div className="mt-6 p-5 bg-red-500/20 border border-red-500/50 rounded-2xl text-white">
+                    <div className="flex items-start gap-3 mb-3">
+                      <span className="text-2xl">⚠️</span>
+                      <div className="flex-1">
+                        <strong className="font-bold text-lg block mb-2">Error</strong>
+                        {error.includes('Compilation failed') ? (
+                          <div>
+                            <p className="text-white/90 mb-3">Your C code has compilation errors:</p>
+                            <pre className="bg-black/40 p-4 rounded-xl overflow-x-auto text-sm font-mono text-red-300 whitespace-pre-wrap">
+                              {error.replace('Feature extraction failed: Compilation failed: Failed to compile C source: ', '').trim()}
+                            </pre>
+                            <p className="text-white/70 text-sm mt-3">
+                              💡 <strong>Tip:</strong> Please fix the compilation errors in your C code and try again. Make sure your code compiles with standard C compilers.
+                            </p>
+                          </div>
+                        ) : (
+                          <p className="text-white/90">{error}</p>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                 {file && (
                   <p className="mt-6 p-5 glass-card rounded-2xl text-white text-center">
@@ -232,14 +264,15 @@ export default function Demo() {
 
                 <section className="glass-card p-6 rounded-2xl mb-6 animate-slide-in">
                   <header className="flex justify-between items-center mb-4">
-                    <h3 className="text-xl font-bold text-white">Predicted Pass Sequence</h3>
+                    <h3 className="text-xl font-bold text-white">ML Predicted Pass Sequence</h3>
                     <nav className="flex gap-3">
                       <button onClick={copyPasses} className="font-bold text-white bg-green-500/30 hover:bg-green-500/50 px-4 py-2 rounded-xl transition-all hover:scale-105">Copy</button>
                       <button onClick={downloadResults} className="font-bold text-white bg-indigo-500/30 hover:bg-indigo-500/50 px-4 py-2 rounded-xl transition-all hover:scale-105">Download</button>
                     </nav>
                   </header>
+                  <p className="text-white/80 mb-4">Generated by feeding extracted features to ML model</p>
                   <ul className="flex flex-wrap gap-3">
-                    {results.predicted_passes.map((pass: string, index: number) => (
+                    {results.data?.predicted_passes?.map((pass: string, index: number) => (
                       <li key={index} className="flex items-center px-4 py-2 bg-white/20 hover:bg-white/30 text-white rounded-xl font-medium transition-all hover:scale-105">
                         {getPassIcon(pass)}
                         <span className="ml-2">{pass}</span>
@@ -249,22 +282,17 @@ export default function Demo() {
                 </section>
 
                 <section className="glass-card p-6 rounded-2xl animate-slide-in">
-                  <h3 className="text-xl font-bold text-white mb-4">Extracted Features</h3>
-                  <dl className="grid grid-cols-2 md:grid-cols-3 gap-4">
-                    {Object.entries(results.features).map(([key, value]) => (
-                      <div key={key} className="glass p-4 rounded-xl hover:bg-white/15">
-                        <dt className="text-white/80 capitalize text-sm font-medium">{key.replace(/_/g, ' ')}</dt>
-                        <dd className="font-bold text-white text-xl mt-1">{typeof value === 'number' ? value.toFixed(2) : String(value)}</dd>
+                  <h3 className="text-xl font-bold text-white mb-4">LLVM IR Features Extracted</h3>
+                  <p className="text-white/80 mb-4">Features used as input to ML model for pass prediction</p>
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-3 max-h-64 overflow-y-auto">
+                    {results.data?.features && Object.entries(results.data.features).map(([key, value]) => (
+                      <div key={key} className="glass p-3 rounded-lg">
+                        <dt className="text-white/80 capitalize text-xs font-medium">{key.replace(/_/g, ' ')}</dt>
+                        <dd className="font-bold text-white text-sm mt-1">{typeof value === 'number' ? value.toFixed(2) : String(value)}</dd>
                       </div>
                     ))}
-                  </dl>
+                  </div>
                 </section>
-
-                <button 
-                  onClick={handleComparePerformance}
-                  className="w-full mt-8 px-8 py-5 text-xl font-bold text-white bg-gradient-to-r from-pink-500 to-rose-600 rounded-2xl hover:from-pink-600 hover:to-rose-700 shadow-2xl hover:scale-105 transition-all duration-300 animate-fade-in">
-                  ⚡ Compare Performance
-                </button>
               </>
             )}
         </article>

@@ -1,0 +1,25 @@
+# IRis Backend API Dependencies
+
+# Web Framework
+Flask==3.0.0
+flask-cors==4.0.0
+Werkzeug==3.0.1
+
+# Machine Learning
+torch>=2.2.0
+numpy>=1.26.0
+scikit-learn>=1.3.2
+pandas>=2.1.3
+xgboost>=2.0.3
+joblib>=1.3.2
+
+# Data Processing
+scipy>=1.11.4
+
+# Utilities
+python-dotenv==1.0.0
+
+# Note: LLVM tools (clang, opt, llc) and RISC-V toolchain must be installed separately
+# - clang (with LLVM tools)
+# - riscv64-linux-gnu-gcc (RISC-V cross-compiler)
+# - qemu-riscv64 (QEMU for RISC-V emulation)

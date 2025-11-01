@@ -37,6 +37,7 @@ const Spinner = () => (
 
 export default function Demo() {
   const [file, setFile] = useState<File | null>(null);
+  const [beamSize, setBeamSize] = useState<number>(5); // New state for beam size
   // Model selection is removed from the UI. Always use transformer on frontend.
   const model = 'transformer';
   const [loading, setLoading] = useState(false);
@@ -133,7 +134,8 @@ export default function Demo() {
           // Don't send ir_passes - let transformer predict them
           use_transformer: true,
           opt_level_hint: 'O_2', // Can be customized based on UI selection
-          target_arch: 'riscv64'
+          target_arch: 'riscv64',
+          beam_size: beamSize // Pass beamSize to the backend
         }),
       });
 
@@ -216,6 +218,19 @@ export default function Demo() {
                     <span className="block mt-2 text-white/80">{(file.size / 1024).toFixed(2)} KB</span>
                   </p>
                 )}
+
+                <div className="mt-6">
+                  <label htmlFor="beam-size" className="block text-white text-lg font-medium mb-2">Beam Size:</label>
+                  <input
+                    type="number"
+                    id="beam-size"
+                    min="1"
+                    max="20"
+                    value={beamSize}
+                    onChange={(e) => setBeamSize(parseInt(e.target.value))}
+                    className="w-full p-3 rounded-xl bg-white/10 text-white border border-white/20 focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all"
+                  />
+                </div>
 
                 <button 
                   onClick={handleSubmit} 

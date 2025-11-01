@@ -343,7 +343,8 @@ class LLVMOptimizationService:
         ir_passes: Optional[List[str]] = None,
         machine_config: Optional[Dict] = None,
         use_transformer: bool = True,
-        opt_level_hint: str = "O_0"
+        opt_level_hint: str = "O_0",
+        beam_size: int = 5
     ) -> Tuple[bool, Optional[Dict], Optional[str]]:
         """
         Apply ML-generated optimization passes and measure metrics.
@@ -371,7 +372,7 @@ class LLVMOptimizationService:
             success, predicted_passes, error = self.predict_passes_with_transformer(
                 features, 
                 opt_level_hint,
-                beam_size=5
+                beam_size=beam_size
             )
             if success:
                 ir_passes = predicted_passes

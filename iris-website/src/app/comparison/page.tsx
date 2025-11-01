@@ -1,342 +1,361 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
-import Link from 'next/link';
+import { useState, useCallback } from 'react';
+import { useDropzone } from 'react-dropzone';
 import Layout from '../components/Layout';
-import ComparisonUI from './ComparisonUI';
+import API_ENDPOINTS from '@/config/api';
 
-interface ComparisonData {
-  sourceCode: string;
-  fileName: string;
-  predictedPasses: string[];
-  features: Record<string, number>;
-  modelUsed: string;
-  processingTime: number;
-  timestamp: number;
-}
-
-interface MethodResult {
-  success: boolean;
-  binary_size?: number;
-  binary_size_human?: string;
-  runtime_mean?: number;
-  runtime_std?: number;
-  runtime_min?: number;
-  runtime_max?: number;
-  passes_used?: string[];
-  num_passes?: number;
-  compilation_time?: number;
-  error?: string;
-}
-
-interface Improvement {
-  binary_size_reduction_percent: number;
-  binary_size_reduction_bytes: number;
-  runtime_reduction_percent: number;
-  runtime_reduction_seconds: number;
-  winner_binary: string;
-  winner_runtime: string;
-}
-
-interface ComparisonResults {
-  success: boolean;
-  ml_predicted: MethodResult;
-  llvm_o0?: MethodResult;
-  llvm_o2?: MethodResult;
-  llvm_o3?: MethodResult;
-  llvm_oz?: MethodResult;
-  improvements: Record<string, Improvement>;
-  summary: {
-    ml_wins: {
-      binary_size: number;
-      runtime: number;
-      total: number;
-      out_of: number;
-    };
-    best_binary_size?: {
-      method: string;
-      size: number;
-      size_human: string;
-    };
-    best_runtime?: {
-      method: string;
-      time: number;
-    };
-  };
-  total_processing_time: number;
-}
-
-// Loading spinner component
-const LoadingSpinner = () => (
-  <div className="flex flex-col items-center justify-center min-h-[60vh]">
-    <div className="animate-spin rounded-full h-16 w-16 border-b-4 border-white mb-4"></div>
-    <p className="text-white text-xl">Loading comparison data...</p>
-  </div>
+const Spinner = () => (
+  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white"></div>
 );
 
 export default function Comparison() {
-  const router = useRouter();
-  const searchParams = useSearchParams();
-  const [loading, setLoading] = useState(true);
-  const [comparing, setComparing] = useState(false);
+  const [file, setFile] = useState<File | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [results, setResults] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
-  const [comparisonData, setComparisonData] = useState<ComparisonData | null>(null);
-  const [comparisonResults, setComparisonResults] = useState<ComparisonResults | null>(null);
+  const [optimizationResults, setOptimizationResults] = useState<any>(null);
 
-  useEffect(() => {
-    // Check if we came from demo page
-    const fromDemo = searchParams.get('from') === 'demo';
-    
-    // Try to load data from sessionStorage
-    const storedData = sessionStorage.getItem('iris_comparison_data');
-    
-    if (!storedData) {
-      setError('No comparison data found. Please run the optimizer first.');
-      setLoading(false);
-      return;
+  const onDrop = useCallback((acceptedFiles: File[]) => {
+    if (acceptedFiles.length > 0) {
+      setFile(acceptedFiles[0]);
+      setError(null);
+      setResults(null);
+      setOptimizationResults(null);
     }
-    
-    try {
-      const data: ComparisonData = JSON.parse(storedData);
-      
-      // Validate required fields
-      if (!data.sourceCode || !data.fileName || !data.predictedPasses || !data.features) {
-        setError('Invalid comparison data. Please run the optimizer again.');
-        setLoading(false);
-        return;
-      }
-      
-      // Check if data is not too old (24 hours)
-      const dataAge = Date.now() - data.timestamp;
-      const maxAge = 24 * 60 * 60 * 1000; // 24 hours
-      if (dataAge > maxAge) {
-        setError('Comparison data is too old. Please run the optimizer again.');
-        setLoading(false);
-        return;
-      }
-      
-      // Data is valid
-      setComparisonData(data);
-      setLoading(false);
-    } catch (err) {
-      setError('Failed to parse comparison data. Please run the optimizer again.');
-      setLoading(false);
-    }
-  }, [searchParams]);
+  }, []);
 
-  // Auto-trigger comparison when data is loaded
-  useEffect(() => {
-    if (comparisonData && !comparing && !comparisonResults && !error) {
-      // Automatically start comparison
-      handleRunComparison();
-    }
-  }, [comparisonData]); // eslint-disable-line react-hooks/exhaustive-deps
+  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+    onDrop,
+    accept: {
+      'text/plain': ['.c', '.cpp'],
+    },
+    multiple: false,
+  });
 
-  const handleGoBack = () => {
-    router.push('/demo');
-  };
+  const handleOptimize = async () => {
+    if (!file) return;
 
-  const handleRunComparison = async () => {
-    if (!comparisonData) return;
-    
-    setComparing(true);
+    setLoading(true);
     setError(null);
-    
+
     try {
-      // Prepare form data
-      const formData = new FormData();
-      
-      // Convert source code string to File object
-      const blob = new Blob([comparisonData.sourceCode], { type: 'text/plain' });
-      const file = new File([blob], comparisonData.fileName, { type: 'text/plain' });
-      
-      formData.append('source_file', file);
-      formData.append('predicted_passes', JSON.stringify(comparisonData.predictedPasses));
-      formData.append('optimization_levels', JSON.stringify(["-O2", "-O3"]));
-      formData.append('num_runs', '5');
-      
-      // Call backend API
-      const response = await fetch('http://localhost:5001/api/compare', {
+      // Read file content
+      const code = await file.text();
+
+      // Use default passes for now (can be enhanced with ML model later)
+      const ir_passes = ['mem2reg', 'simplifycfg', 'instcombine'];
+
+      // Get comparison results directly
+      const compareRes = await fetch(API_ENDPOINTS.compare, {
         method: 'POST',
-        body: formData
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          code,
+          ir_passes,
+          target_arch: 'riscv64'
+        }),
       });
-      
-      const data = await response.json();
-      
-      if (response.ok && data.success) {
-        setComparisonResults(data);
-        setComparing(false);
+
+      const compareData = await compareRes.json();
+
+      if (compareRes.ok && compareData.success) {
+        setResults(compareData);
+        // Store ML optimization results for display
+        setOptimizationResults({
+          success: true,
+          data: {
+            predicted_passes: ir_passes,
+            metrics: compareData.ml_optimization
+          }
+        });
       } else {
-        throw new Error(data.error || 'Comparison failed');
+        setError(compareData.error || 'Failed to compare optimizations');
       }
-    } catch (err: any) {
-      console.error('Comparison error:', err);
-      setError(err.message || 'Failed to run comparison. Make sure the backend is running on http://localhost:5001');
-      setComparing(false);
+    } catch (err) {
+      setError('Failed to connect to the server. Please ensure the backend is running.');
+      console.error(err);
+    } finally {
+      setLoading(false);
     }
   };
 
-  const handleTryAnother = () => {
-    // Clear all data and go back to demo
-    sessionStorage.removeItem('iris_comparison_data');
-    router.push('/demo');
+  const handleClear = () => {
+    setFile(null);
+    setResults(null);
+    setOptimizationResults(null);
+    setError(null);
   };
 
-  const handleDownloadReport = () => {
-    if (!comparisonResults || !comparisonData) return;
-    
-    const report = {
-      metadata: {
-        fileName: comparisonData.fileName,
-        timestamp: new Date().toISOString(),
-        targetArchitecture: 'riscv64',
-        modelUsed: comparisonData.modelUsed
-      },
-      results: comparisonResults,
-      sourceCode: comparisonData.sourceCode
-    };
-    
-    // Create JSON blob and download
-    const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `iris-comparison-${comparisonData.fileName.replace('.c', '')}-${Date.now()}.json`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+  const formatTime = (time: number) => {
+    if (time < 0.001) return `${(time * 1000000).toFixed(2)} µs`;
+    if (time < 1) return `${(time * 1000).toFixed(2)} ms`;
+    return `${time.toFixed(3)} s`;
+  };
+
+  const formatSize = (bytes: number) => {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(2)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
   };
 
   return (
     <Layout>
       <main className="min-h-screen p-8 max-w-6xl mx-auto">
-        <h1 className="text-5xl font-bold mb-12 text-center text-white drop-shadow-lg animate-fade-in">
-          Performance Comparison
-        </h1>
+        <h1 className="text-5xl font-bold mb-12 text-center text-white drop-shadow-lg animate-fade-in">Performance Comparison</h1>
         
-        {loading && <LoadingSpinner />}
-        
-        {error && (
-          <div className="glass-card p-12 rounded-2xl border-2 border-red-400/50 animate-fade-in">
-            <div className="text-center">
-              <span className="text-6xl block mb-6">⚠️</span>
-              <h2 className="text-3xl font-bold text-white mb-4">{comparisonData ? 'Comparison Failed' : 'No Data Available'}</h2>
-              <p className="text-white/80 text-lg mb-8">{error}</p>
+        {!results && (
+          <>
+            <section className="glass-card p-8 rounded-2xl animate-slide-in mb-8">
+              <h2 className="text-2xl font-bold text-white mb-6">Standard LLVM Optimization Levels</h2>
+              <p className="text-white/80 mb-8 text-lg">
+                Compare ML-predicted pass sequences against standard optimization levels (-O0, -O1, -O2, -O3)
+              </p>
+              
+              <ul className="grid grid-cols-2 md:grid-cols-4 gap-6">
+                <li className="glass p-6 rounded-xl text-center hover:bg-white/15 transition-all duration-300 hover:scale-105">
+                  <strong className="text-3xl font-bold text-white">-O0</strong>
+                  <p className="text-sm text-white/70 mt-2">No optimization</p>
+                </li>
+                <li className="glass p-6 rounded-xl text-center hover:bg-white/15 transition-all duration-300 hover:scale-105">
+                  <strong className="text-3xl font-bold text-white">-O1</strong>
+                  <p className="text-sm text-white/70 mt-2">Basic optimization</p>
+                </li>
+                <li className="glass p-6 rounded-xl text-center hover:bg-white/15 transition-all duration-300 hover:scale-105">
+                  <strong className="text-3xl font-bold text-white">-O2</strong>
+                  <p className="text-sm text-white/70 mt-2">Moderate optimization</p>
+                </li>
+                <li className="glass p-6 rounded-xl text-center hover:bg-white/15 transition-all duration-300 hover:scale-105">
+                  <strong className="text-3xl font-bold text-white">-O3</strong>
+                  <p className="text-sm text-white/70 mt-2">Aggressive optimization</p>
+                </li>
+              </ul>
+            </section>
+
+            <section className="glass-card p-8 rounded-2xl animate-slide-in">
+              <h2 className="text-2xl font-bold text-white mb-6">Upload Your Code</h2>
+              
+              <label
+                {...getRootProps()}
+                className={`border-2 border-dashed rounded-2xl p-12 text-center cursor-pointer transition-all glass block mb-6 ${
+                  isDragActive ? 'border-white/60 bg-white/20 scale-105' : 'border-white/30 hover:border-white/50 hover:bg-white/10'
+                }`}>
+                <input {...getInputProps()} />
+                <div className="flex flex-col items-center justify-center">
+                  <p className="text-white font-medium text-xl">
+                    {isDragActive ? 'Drop the file here...' : 'Drag & drop a C/C++ file, or click to select'}
+                  </p>
+                </div>
+              </label>
+
+              {file && (
+                <p className="mb-6 p-5 glass-card rounded-2xl text-white text-center">
+                  <strong className="font-bold">{file.name}</strong>
+                  <span className="block mt-2 text-white/80">{(file.size / 1024).toFixed(2)} KB</span>
+                </p>
+              )}
+
+              {error && (
+                <div className="mb-6 p-5 bg-red-500/20 border border-red-500/50 rounded-2xl text-white">
+                  <div className="flex items-start gap-3">
+                    <span className="text-2xl">⚠️</span>
+                    <div className="flex-1">
+                      <strong className="font-bold text-lg block mb-2">Error</strong>
+                      {error.includes('Compilation failed') || error.includes('compilation errors') ? (
+                        <div>
+                          <p className="text-white/90 mb-3">Your C code has compilation errors:</p>
+                          <pre className="bg-black/40 p-4 rounded-xl overflow-x-auto text-sm font-mono text-red-300 whitespace-pre-wrap max-h-64">
+                            {error.replace('Feature extraction failed: Compilation failed: Failed to compile C source: ', '')
+                                  .replace('Comparison failed: ', '')
+                                  .trim()}
+                          </pre>
+                          <p className="text-white/70 text-sm mt-3">
+                            💡 <strong>Tip:</strong> Please fix the compilation errors in your C code and try again. Make sure your code compiles with standard C compilers.
+                          </p>
+                        </div>
+                      ) : (
+                        <p className="text-white/90">{error}</p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
               <div className="flex gap-4 justify-center">
-                {comparisonData && (
+                <button
+                  onClick={handleOptimize}
+                  disabled={!file || loading}
+                  className="px-8 py-4 bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 text-white font-bold rounded-xl disabled:opacity-50 disabled:cursor-not-allowed transition-all hover:scale-105 shadow-xl">
+                  {loading ? (
+                    <span className="flex items-center gap-2">
+                      <Spinner /> Analyzing...
+                    </span>
+                  ) : (
+                    'Compare Optimizations'
+                  )}
+                </button>
+                {file && (
                   <button
-                    onClick={handleRunComparison}
-                    disabled={comparing}
-                    className="px-8 py-4 text-lg font-bold text-white bg-gradient-to-r from-pink-500 to-rose-600 rounded-2xl hover:from-pink-600 hover:to-rose-700 shadow-xl hover:scale-105 transition-all duration-300 disabled:opacity-50">
-                    {comparing ? 'Retrying...' : '🔄 Retry Comparison'}
+                    onClick={handleClear}
+                    className="px-8 py-4 bg-gray-500/30 hover:bg-gray-500/50 text-white font-bold rounded-xl transition-all hover:scale-105">
+                    Clear
                   </button>
                 )}
-                <Link 
-                  href="/demo"
-                  className="px-8 py-4 text-lg font-bold text-white bg-gradient-to-r from-indigo-500 to-purple-600 rounded-2xl hover:from-indigo-600 hover:to-purple-700 shadow-xl hover:scale-105 transition-all duration-300">
-                  Go to Demo
-                </Link>
-                <Link 
-                  href="/"
-                  className="px-8 py-4 text-lg font-bold text-white bg-white/20 rounded-2xl hover:bg-white/30 shadow-xl hover:scale-105 transition-all duration-300">
-                  Go Home
-                </Link>
-              </div>
-            </div>
-          </div>
-        )}
-        
-        {/* Comparing State */}
-        {comparing && (
-          <div className="flex flex-col items-center justify-center min-h-[60vh]">
-            <div className="animate-spin rounded-full h-16 w-16 border-b-4 border-white mb-4"></div>
-            <p className="text-white text-2xl font-bold mb-2">Running Comparison...</p>
-            <p className="text-white/60 text-sm">Compiling and measuring performance on RISC-V</p>
-            <p className="text-white/60 text-sm mt-1">This may take 10-20 seconds</p>
-          </div>
-        )}
-
-        {!loading && !error && !comparing && comparisonData && !comparisonResults && (
-          <>
-            {/* File Information */}
-            <section className="glass-card p-6 rounded-2xl mb-6 animate-fade-in">
-              <div className="flex flex-col md:flex-row md:justify-between md:items-center gap-4">
-                <div>
-                  <h2 className="text-2xl font-bold text-white mb-2">Source File</h2>
-                  <p className="text-white/80 text-lg">
-                    <strong className="text-white">{comparisonData.fileName}</strong>
-                  </p>
-                  <p className="text-white/60 text-sm mt-1">
-                    Model: <span className="text-white capitalize">{comparisonData.modelUsed}</span> | 
-                    Processed: {new Date(comparisonData.timestamp).toLocaleString()}
-                  </p>
-                </div>
-                <div className="flex gap-3">
-                  <button
-                    onClick={handleRunComparison}
-                    className="px-8 py-4 text-lg font-bold text-white bg-gradient-to-r from-pink-500 to-rose-600 rounded-2xl hover:from-pink-600 hover:to-rose-700 shadow-xl hover:scale-105 transition-all duration-300">
-                    ⚡ Run Comparison
-                  </button>
-                  <button
-                    onClick={handleGoBack}
-                    className="px-6 py-3 font-bold text-white bg-white/20 rounded-xl hover:bg-white/30 transition-all hover:scale-105">
-                    ← Back
-                  </button>
-                </div>
               </div>
             </section>
-
-            {/* ML Predicted Passes */}
-            <section className="glass-card p-6 rounded-2xl mb-6 animate-slide-in">
-              <h2 className="text-2xl font-bold text-white mb-4">ML-Predicted Pass Sequence</h2>
-              <div className="bg-black/30 p-4 rounded-xl">
-                <p className="text-white/70 text-sm mb-2">Passes ({comparisonData.predictedPasses.length}):</p>
-                <div className="flex flex-wrap gap-2">
-                  {comparisonData.predictedPasses.map((pass, index) => (
-                    <span key={index} className="px-3 py-1 bg-indigo-500/30 text-white rounded-lg text-sm font-medium">
-                      {pass}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            </section>
-            
-            {/* Ready to compare message */}
-            <div className="mt-8 text-center animate-fade-in glass-card p-12 rounded-2xl">
-              <span className="text-6xl block mb-6">🚀</span>
-              <p className="text-2xl text-white/90 font-bold mb-4">Ready to Compare!</p>
-              <p className="text-white/70 text-lg mb-8">
-                Click "Run Comparison" to see how ML-predicted passes perform against standard LLVM optimization levels.
-              </p>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <div className="glass p-6 rounded-xl">
-                  <p className="text-white/60 text-sm mb-2">Source Lines</p>
-                  <p className="text-white text-2xl font-bold">{comparisonData.sourceCode.split('\n').length}</p>
-                </div>
-                <div className="glass p-6 rounded-xl">
-                  <p className="text-white/60 text-sm mb-2">Predicted Passes</p>
-                  <p className="text-white text-2xl font-bold">{comparisonData.predictedPasses.length}</p>
-                </div>
-                <div className="glass p-6 rounded-xl">
-                  <p className="text-white/60 text-sm mb-2">Model Used</p>
-                  <p className="text-white text-2xl font-bold capitalize">{comparisonData.modelUsed}</p>
-                </div>
-              </div>
-            </div>
           </>
         )}
 
-        {/* Comparison Results */}
-        {!loading && !error && !comparing && comparisonResults && comparisonData && (
-          <ComparisonUI
-            results={comparisonResults}
-            fileName={comparisonData.fileName}
-            onBackClick={handleGoBack}
-            onDownloadReport={handleDownloadReport}
-            onTryAnother={handleTryAnother}
-          />
+        {results && (
+          <>
+            <button
+              onClick={handleClear}
+              className="mb-8 px-6 py-3 bg-gray-500/30 hover:bg-gray-500/50 text-white font-bold rounded-xl transition-all hover:scale-105">
+              ← New Comparison
+            </button>
+
+            {/* Summary */}
+            <section className="glass-card p-8 rounded-2xl mb-8 animate-slide-in">
+              <h2 className="text-3xl font-bold text-white mb-6">Comparison Summary</h2>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="glass p-6 rounded-xl">
+                  <h3 className="text-xl font-bold text-white mb-2">ML Beats Standard Levels</h3>
+                  <p className="text-4xl font-bold text-green-400">
+                    {(() => {
+                      const beatsCount = Object.entries(results.comparison || {}).filter(
+                        ([key, val]: [string, any]) => key.startsWith('-O') && val.ml_faster
+                      ).length;
+                      return `${beatsCount} / 4`;
+                    })()}
+                  </p>
+                  <p className="text-white/60 mt-2">
+                    {(() => {
+                      const beats = Object.entries(results.comparison || {}).filter(
+                        ([key, val]: [string, any]) => key.startsWith('-O') && val.ml_faster
+                      ).map(([key]) => key);
+                      return beats.length > 0 ? beats.join(', ') : 'None';
+                    })()}
+                  </p>
+                </div>
+                <div className="glass p-6 rounded-xl">
+                  <h3 className="text-xl font-bold text-white mb-2">Best Performance</h3>
+                  <p className="text-4xl font-bold text-purple-400">
+                    {results.comparison?.vs_best?.ml_beats_best ? '✓ ML Wins' : '✗ Standard Wins'}
+                  </p>
+                </div>
+              </div>
+            </section>
+
+            {/* ML Optimization Results */}
+            <section className="glass-card p-8 rounded-2xl mb-8 animate-slide-in">
+              <h2 className="text-2xl font-bold text-white mb-6">ML Optimization Results</h2>
+              <p className="text-white/80 mb-4">Applied predicted pass sequence to optimize for RISC-V</p>
+              {results.ml_optimization?.error ? (
+                <div className="bg-red-500/20 border border-red-500/50 rounded-xl p-6">
+                  <div className="flex items-start gap-3 mb-3">
+                    <span className="text-2xl">⚠️</span>
+                    <div className="flex-1">
+                      <strong className="font-bold text-white text-lg block mb-2">Compilation Failed</strong>
+                      <p className="text-white/90 mb-3">The ML-optimized code failed to compile:</p>
+                      <pre className="bg-black/40 p-4 rounded-xl overflow-x-auto text-sm font-mono text-red-300 whitespace-pre-wrap max-h-48">
+                        {results.ml_optimization.error}
+                      </pre>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-6">
+                  <div className="glass p-6 rounded-xl">
+                    <p className="text-white/70 text-sm">Execution Time</p>
+                    <p className="text-2xl font-bold text-green-400 mt-2">
+                      {results.ml_optimization?.execution_time_avg ? formatTime(results.ml_optimization.execution_time_avg) : 'N/A'}
+                    </p>
+                  </div>
+                  <div className="glass p-6 rounded-xl">
+                    <p className="text-white/70 text-sm">Binary Size</p>
+                    <p className="text-2xl font-bold text-blue-400 mt-2">
+                      {results.ml_optimization?.binary_size ? formatSize(results.ml_optimization.binary_size) : 'N/A'}
+                    </p>
+                  </div>
+                  <div className="glass p-6 rounded-xl">
+                    <p className="text-white/70 text-sm">Compile Time</p>
+                    <p className="text-2xl font-bold text-purple-400 mt-2">
+                      {results.ml_optimization?.compile_time ? formatTime(results.ml_optimization.compile_time) : 'N/A'}
+                    </p>
+                  </div>
+                </div>
+              )}
+            </section>
+
+            {/* Features */}
+            <section className="glass-card p-8 rounded-2xl mb-8 animate-slide-in">
+              <h2 className="text-2xl font-bold text-white mb-6">LLVM IR Features</h2>
+              <p className="text-white/80 mb-4">73 features extracted from source code and fed to ML model</p>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 max-h-96 overflow-y-auto">
+                {results.features && Object.entries(results.features).map(([key, value]) => (
+                  <div key={key} className="glass p-4 rounded-xl hover:bg-white/15">
+                    <dt className="text-white/80 capitalize text-sm font-medium">{key.replace(/_/g, ' ')}</dt>
+                    <dd className="font-bold text-white text-lg mt-1">{typeof value === 'number' ? value.toFixed(2) : String(value)}</dd>
+                  </div>
+                ))}
+              </div>
+            </section>
+
+            {/* Standard Optimizations */}
+            <section className="glass-card p-8 rounded-2xl mb-8 animate-slide-in">
+              <h2 className="text-2xl font-bold text-white mb-6">Standard LLVM Optimizations</h2>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                {['-O0', '-O1', '-O2', '-O3'].map((level) => {
+                  const data = results.standard_optimizations?.[level];
+                  const comparisonData = results.comparison?.[level];
+                  const speedup = comparisonData?.speedup || 0;
+                  return (
+                    <div key={level} className="glass p-6 rounded-xl">
+                      <h3 className="text-xl font-bold text-white mb-4">{level}</h3>
+                      <div className="space-y-3">
+                        <div>
+                          <p className="text-white/70 text-sm">Execution Time</p>
+                          <p className="text-lg font-bold text-white">
+                            {data?.execution_time_avg ? formatTime(data.execution_time_avg) : 'N/A'}
+                          </p>
+                        </div>
+                        <div>
+                          <p className="text-white/70 text-sm">Binary Size</p>
+                          <p className="text-lg font-bold text-white">
+                            {data?.binary_size ? formatSize(data.binary_size) : 'N/A'}
+                          </p>
+                        </div>
+                        {comparisonData && (
+                          <div className="pt-2 border-t border-white/10">
+                            <p className="text-white/70 text-sm">ML Speedup</p>
+                            <p className={`text-lg font-bold ${comparisonData.ml_faster ? 'text-green-400' : 'text-red-400'}`}>
+                              {speedup.toFixed(2)}x {comparisonData.ml_faster ? '✓' : '✗'}
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+
+            {/* Predicted Passes */}
+            {optimizationResults?.data?.predicted_passes && (
+              <section className="glass-card p-8 rounded-2xl animate-slide-in">
+                <h2 className="text-2xl font-bold text-white mb-6">ML Predicted Pass Sequence</h2>
+                <ul className="flex flex-wrap gap-3">
+                  {optimizationResults.data.predicted_passes.map((pass: string, index: number) => (
+                    <li key={index} className="px-4 py-2 bg-white/20 hover:bg-white/30 text-white rounded-xl font-medium transition-all hover:scale-105">
+                      {pass}
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )}
+          </>
         )}
       </main>
     </Layout>
